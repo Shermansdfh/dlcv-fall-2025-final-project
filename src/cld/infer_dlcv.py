@@ -189,8 +189,59 @@ def main() -> int:
     except ImportError:
         pass  # torch check already done above
 
-    # Directly reuse CLD's load_config and inference_layout
+    # Load config first to check if we should use pipeline dataset
     config = cld_infer.load_config(str(config_path))
+    
+    # Check if we should use pipeline dataset instead of LayoutTrainDataset
+    use_pipeline_dataset = config.get("use_pipeline_dataset", False)
+    
+    if use_pipeline_dataset:
+        # Import PipelineDataset from our custom dataset module
+        # Need to add repo_root/src to path to import our custom dataset
+        repo_root_src = repo_root / "src"
+        if str(repo_root_src) not in sys.path:
+            sys.path.insert(0, str(repo_root_src))
+        
+        from data.custom_cld_dataset import PipelineDataset, collate_fn_pipeline
+        
+        # Monkey patch tools.dataset module to replace LayoutTrainDataset with PipelineDataset
+        # This way, when infer.py does `from tools.dataset import LayoutTrainDataset`,
+        # it will actually get our PipelineDataset
+        import tools.dataset as dataset_module
+        
+        # Store original LayoutTrainDataset for fallback
+        original_LayoutTrainDataset = dataset_module.LayoutTrainDataset
+        original_collate_fn = dataset_module.collate_fn
+        
+        # Create a closure to capture config for max_image_side and max_image_size
+        def create_patched_LayoutTrainDataset(config_ref):
+            """Factory function to create a patched LayoutTrainDataset that uses PipelineDataset."""
+            class LayoutTrainDatasetWrapper:
+                """Wrapper that makes PipelineDataset compatible with LayoutTrainDataset interface."""
+                def __init__(self, data_dir, split="test"):
+                    # Ignore split parameter (PipelineDataset doesn't use it)
+                    # Get max_image_side and max_image_size from config
+                    self.dataset = PipelineDataset(
+                        data_dir=data_dir,
+                        max_image_side=config_ref.get('max_image_side'),
+                        max_image_size=config_ref.get('max_image_size'),
+                    )
+                
+                def __len__(self):
+                    return len(self.dataset)
+                
+                def __getitem__(self, idx):
+                    return self.dataset[idx]
+            
+            return LayoutTrainDatasetWrapper
+        
+        # Replace LayoutTrainDataset with patched version that uses config
+        dataset_module.LayoutTrainDataset = create_patched_LayoutTrainDataset(config)
+        dataset_module.collate_fn = collate_fn_pipeline
+        
+        print("✅ Patched tools.dataset to use PipelineDataset instead of LayoutTrainDataset")
+    
+    # Call inference_layout (will use patched dataset if use_pipeline_dataset=True)
     cld_infer.inference_layout(config)
     return 0
 
