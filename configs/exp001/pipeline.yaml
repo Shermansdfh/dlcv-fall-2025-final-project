@@ -1,0 +1,54 @@
+# Full Pipeline Configuration
+# This config file is used by all three steps: RTDETR, LayerD, and CLD
+
+# RTDETR Detection Step
+rtdetr:
+  input_dir: "inputs"  # Input images directory
+  output_dir: "outputs/pipeline_outputs/rtdetr"  # Where to save RTDETR results
+  model_path: "checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt"  # RTDETR model path
+  conf: 0.4  # Confidence threshold
+  limit: null  # Limit number of images (null = process all)
+
+# LayerD Decomposition Step
+layerd:
+  rtdetr_output_dir: "outputs/pipeline_outputs/rtdetr"  # Read RTDETR results from here
+  output_dir: "outputs/pipeline_outputs/layerd"  # Where to save LayerD masks
+  max_iterations: 2  # LayerD decomposition iterations (reduced from 3 to save memory)
+  device: "cuda"  # Device: "cpu" or "cuda"
+  limit: null  # Limit number of images (null = process all)
+  matting_process_size: [512, 512]  # Image processing size [width, height] to reduce memory usage. Reduced from [1024, 1024] to prevent OOM.
+  max_image_size: [1536, 1536]  # Maximum image size [width, height] before processing. Large images will be resized to this size to reduce LaMa memory usage. 
+                                 # WARNING: Resizing affects quality - masks are upscaled but may lose fine details.
+                                 # For best quality, set to null or a very large value (e.g., [2048, 2048] or [3072, 3072]).
+                                 # Lower values (e.g., [1024, 1024]) save more memory but may reduce quality.
+
+# CLD Format Conversion Step
+cld:
+  rtdetr_output_dir: "outputs/pipeline_outputs/rtdetr"  # Read RTDETR results from here
+  layerd_output_dir: "outputs/pipeline_outputs/layerd"  # Read LayerD results from here
+  output_dir: "outputs/pipeline_outputs/cld"  # Where to save CLD format results
+
+# Step 3.5: VLM Caption Generation (runs in separate environment)
+step3_5:
+  cld_output_dir: "outputs/pipeline_outputs/cld"  # Read CLD JSON files from here
+  force_regenerate: false  # Set to true to regenerate captions even if they already exist
+  vlm:
+    use_vlm_caption: true  # Set to true to enable VLM caption generation
+    vlm_model_id: "liuhaotian/llava-v1.5-7b"  # LLaVA 1.5 model (HuggingFace model ID)
+    vlm_model_base: null  # Optional: base model path for LoRA models
+    vlm_device: "cuda"
+    vlm_load_in_4bit: true  # Use 4-bit quantization to save memory
+    vlm_load_in_8bit: false  # Use 8-bit quantization (alternative to 4-bit)
+    vlm_max_new_tokens: 96
+    vlm_temperature: 0.2
+    vlm_top_p: null  # Optional: top-p sampling (null = disabled)
+    vlm_num_beams: 1  # Number of beams for beam search (1 = greedy decoding)
+    vlm_prompt: "Describe style, main subject, and especially the background of the whole image in one short sentence."
+
+# Environment names
+rtdetr_conda_env: "ultralytics"  # Conda environment for RTDETR step (Step 1)
+# LayerD uses native uv (no conda env needed)
+cld_conda_env: "CLD"  # Conda environment for CLD format conversion (Step 3) and CLD inference (Step 4)
+vlm_conda_env: "llava"  # Conda environment for VLM caption generation (Step 3.5)
+
+

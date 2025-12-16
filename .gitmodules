@@ -1,0 +1,12 @@
+[submodule "third_party/llava"]
+	path = third_party/llava
+	url = https://github.com/haotian-liu/LLaVA
+[submodule "third_party/ultralytics"]
+	path = third_party/ultralytics
+	url = https://github.com/ultralytics/ultralytics
+[submodule "third_party/layerd"]
+	path = third_party/layerd
+	url = https://github.com/CyberAgentAILab/LayerD.git
+[submodule "third_party/cld"]
+	path = third_party/cld
+	url = https://github.com/monkek123King/CLD.git

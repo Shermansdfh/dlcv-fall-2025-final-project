@@ -1,0 +1,189 @@
+# ==========================================
+# Python
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ==========================================
+# Model Weights & Checkpoints
+# ==========================================
+# Checkpoints directory - ignore files but keep structure
+checkpoints/*
+!checkpoints/.gitkeep
+weights/*
+!weights/.gitkeep
+
+# Model weight files
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.tflite
+*.pb
+
+# ==========================================
+# Data & Datasets
+# ==========================================
+# Dataset directories (keep structure but ignore contents)
+data/
+!data/.gitkeep
+!data/README.md
+
+# Input data
+inputs/
+raw_data/
+
+# ==========================================
+# Outputs & Results
+# ==========================================
+# Pipeline outputs - ignore files but keep structure
+outputs/*
+!outputs/.gitkeep
+pipeline_outputs/*
+!pipeline_outputs/.gitkeep
+
+# Experiment results - ignore files but keep structure
+experiments/*
+!experiments/.gitkeep
+
+# NumPy arrays (but allow if needed in specific contexts)
+*.npz
+*.npy
+
+# ==========================================
+# Logs & Temporary Files
+# ==========================================
+# Log files
+*.log
+*.out
+*.err
+
+# HPC logs - ignore files but keep directory structure
+HPC_logs/*
+!HPC_logs/.gitkeep
+hpc/logs/*
+!hpc/logs/.gitkeep
+**/HPC_logs/*
+!**/HPC_logs/.gitkeep
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# ==========================================
+# IDE & Editor
+# ==========================================
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ==========================================
+# Environment & Virtual Environments
+# ==========================================
+.env
+.env.local
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Conda
+.conda/
+
+# ==========================================
+# Testing & Coverage
+# ==========================================
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+*.cover
+.hypothesis/
+
+# ==========================================
+# OS Files
+# ==========================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ==========================================
+# HuggingFace Cache
+# ==========================================
+.cache/
+huggingface/
+transformers_cache/
+
+# ==========================================
+# UV / Python Package Manager
+# ==========================================
+.uv/
+uv.lock
+
+# ==========================================
+# Large Files & Media
+# ==========================================
+# Large image/video files (uncomment if needed)
+# *.jpg
+# *.jpeg
+# *.png
+# *.gif
+# *.mp4
+# *.avi
+# *.mov
+
+# ==========================================
+# Project Specific
+# ==========================================
+# Keep config examples but ignore user configs with secrets
+configs/*/secrets.yaml
+configs/*/*_secret.yaml
+configs/*/*_local.yaml
+
+# Keep structure files
+!**/.gitkeep
+
