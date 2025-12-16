@@ -689,14 +689,16 @@ def main() -> int:
             # Save whole image_RGBA (X_hat[0]) and background_RGBA (X_hat[1])
             # x_hat is already on CPU, so no need to call .cpu() again
             whole_image_layer = (x_hat[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-            whole_image_rgba_image = Image.fromarray(whole_image_layer, "RGBA")
+            # Pillow can auto-detect RGBA format from shape [H, W, 4]
+            whole_image_rgba_image = Image.fromarray(whole_image_layer)
             whole_image_rgba_image.save(os.path.join(case_dir, "whole_image_rgba.png"))
             del whole_image_layer, whole_image_rgba_image
 
             adapter_img.save(os.path.join(case_dir, "origin.png"))
 
             background_layer = (x_hat[1].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-            background_rgba_image = Image.fromarray(background_layer, "RGBA")
+            # Pillow can auto-detect RGBA format from shape [H, W, 4]
+            background_rgba_image = Image.fromarray(background_layer)
             background_rgba_image.save(os.path.join(case_dir, "background_rgba.png"))
             del background_layer, background_rgba_image
 
@@ -708,7 +710,8 @@ def main() -> int:
             for layer_idx in range(x_hat.shape[0]):
                 layer = x_hat[layer_idx]  # Already on CPU
                 rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                rgba_image = Image.fromarray(rgba_layer, "RGBA")
+                # Pillow can auto-detect RGBA format from shape [H, W, 4]
+                rgba_image = Image.fromarray(rgba_layer)
                 rgba_image.save(os.path.join(case_dir, f"layer_{layer_idx}_rgba.png"))
                 # Clean up immediately after saving
                 del layer, rgba_layer, rgba_image
@@ -717,7 +720,8 @@ def main() -> int:
             for layer_idx in range(x_hat.shape[0]):
                 layer = x_hat[layer_idx]  # Already on CPU
                 rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                layer_image = Image.fromarray(rgba_layer, "RGBA")
+                # Pillow can auto-detect RGBA format from shape [H, W, 4]
+                layer_image = Image.fromarray(rgba_layer)
                 merged_image = Image.alpha_composite(merged_image.convert('RGBA'), layer_image)
                 # Clean up immediately
                 del layer, rgba_layer, layer_image
@@ -749,11 +753,19 @@ def main() -> int:
                 torch.cuda.reset_peak_memory_stats()
             
             # Print memory usage every image (for debugging)
-            if torch.cuda.is_available():
-                allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-                reserved = torch.cuda.memory_reserved() / 1024**3  # GB
-                free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(0)) / 1024**3
-                print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {free:.2f} GB free", flush=True)
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                try:
+                    device_id = torch.cuda.current_device()
+                    allocated = torch.cuda.memory_allocated(device_id) / 1024**3  # GB
+                    reserved = torch.cuda.memory_reserved(device_id) / 1024**3  # GB
+                    total_memory = torch.cuda.get_device_properties(device_id).total_memory / 1024**3  # GB
+                    free = total_memory - reserved
+                    print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {free:.2f} GB free (total: {total_memory:.2f} GB)", flush=True)
+                except (AssertionError, RuntimeError) as e:
+                    # Fallback if device properties are not accessible
+                    allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                    reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+                    print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved", flush=True)
             
             idx += 1
 
