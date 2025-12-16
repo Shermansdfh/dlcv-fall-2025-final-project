@@ -155,13 +155,21 @@ class LayerDecompositionPipeline:
         whole_caption = caption
 
         if boxes.size == 0:
+            # Even with no boxes, add a background bbox
+            background_bbox = [0, 0, width - 1, height - 1]
+            background_debug = LayerMatchResult(
+                box_index=-1,
+                mask_index=-1,
+                iof=1.0,
+                rescued_from_background=False,
+            )
             return ProcessOutput(
                 origin_image=None,
                 caption=caption,
                 whole_caption=whole_caption,
-                ordered_bboxes=[],
-                layer_indices=[],
-                debug_info={"matches": []},
+                ordered_bboxes=[background_bbox],
+                layer_indices=[0],  # Background layer
+                debug_info={"matches": [background_debug]},
             )
 
         masks = [self._ensure_mask_size(m, height, width) for m in layerd_masks]
@@ -186,6 +194,20 @@ class LayerDecompositionPipeline:
         ordered_bboxes = [[int(round(c)) for c in boxes[i, :4]] for i in order]
         ordered_layers = [int(layer_indices[i]) for i in order]
         ordered_debug = [debug_matches[i] for i in order]
+
+        # Always add a full-image bbox as background layer (layer index 0)
+        # This ensures CLD inference always has a background layer
+        background_bbox = [0, 0, width - 1, height - 1]
+        ordered_bboxes.insert(0, background_bbox)
+        ordered_layers.insert(0, 0)  # Background layer index is 0
+        # Add a debug entry for the background bbox
+        background_debug = LayerMatchResult(
+            box_index=-1,  # Special index for background bbox
+            mask_index=-1,
+            iof=1.0,  # Full image coverage
+            rescued_from_background=False,
+        )
+        ordered_debug.insert(0, background_debug)
 
         return ProcessOutput(
             origin_image=None,
