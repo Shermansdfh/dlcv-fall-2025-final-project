@@ -166,6 +166,116 @@ def main() -> int:
 
     cld_infer = _load_module_from_path("cld_infer", cld_infer_py)
 
+    # Optimize LoRA loading: Monkey patch CustomFluxPipeline.lora_state_dict AFTER loading cld_infer module
+    # This ensures LoRA weights are loaded directly to GPU using safetensors for faster loading
+    try:
+        import torch
+        import time
+        
+        # Import CustomFluxPipeline from the loaded module
+        from models.pipeline import CustomFluxPipeline
+        
+        # Store original lora_state_dict method
+        if hasattr(CustomFluxPipeline, 'lora_state_dict'):
+            original_lora_state_dict = CustomFluxPipeline.lora_state_dict
+            
+            @staticmethod
+            def optimized_lora_state_dict(lora_path, *args, **kwargs):
+                """
+                Optimized LoRA loading that:
+                1. Ensures safetensors format is used
+                2. Loads directly to GPU (cuda)
+                3. Provides progress indication
+                """
+                import safetensors.torch
+                
+                lora_path_obj = Path(lora_path)
+                
+                # Check if it's a directory or file path
+                if lora_path_obj.is_dir():
+                    # Look for safetensors file in directory
+                    safetensors_file = lora_path_obj / "pytorch_lora_weights.safetensors"
+                    if not safetensors_file.exists():
+                        # Fallback: try to find any safetensors file
+                        safetensors_files = list(lora_path_obj.glob("*.safetensors"))
+                        if safetensors_files:
+                            safetensors_file = safetensors_files[0]
+                        else:
+                            print(f"⚠️  Warning: No safetensors file found in {lora_path}, falling back to original method")
+                            return original_lora_state_dict(lora_path, *args, **kwargs)
+                    lora_file = safetensors_file
+                elif lora_path_obj.suffix == ".safetensors":
+                    lora_file = lora_path_obj
+                else:
+                    # Not safetensors format, try to find safetensors version
+                    safetensors_file = lora_path_obj.parent / f"{lora_path_obj.stem}.safetensors"
+                    if safetensors_file.exists():
+                        lora_file = safetensors_file
+                        print(f"   📦 Found safetensors version: {lora_file}")
+                    else:
+                        print(f"⚠️  Warning: LoRA file is not safetensors format: {lora_path}")
+                        print(f"   Expected safetensors file: {safetensors_file}")
+                        print(f"   Falling back to original method (may be slower)")
+                        return original_lora_state_dict(lora_path, *args, **kwargs)
+                
+                if not lora_file.exists():
+                    print(f"⚠️  Warning: LoRA file not found: {lora_file}, falling back to original method")
+                    return original_lora_state_dict(lora_path, *args, **kwargs)
+                
+                print(f"   📦 Loading LoRA weights from: {lora_file}", flush=True)
+                print(f"   ✅ Using safetensors format (faster loading)", flush=True)
+                
+                start_time = time.time()
+                
+                # Determine device - prefer GPU if available
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                if device == "cpu":
+                    print(f"   ⚠️  Warning: CUDA not available, loading to CPU (will be slower)", flush=True)
+                
+                try:
+                    # Load safetensors - try direct GPU loading first, fallback to CPU then move to GPU
+                    # safetensors.torch.load_file returns a dict of tensors
+                    try:
+                        # Try loading directly to GPU if device parameter is supported
+                        state_dict = safetensors.torch.load_file(str(lora_file), device=device)
+                        loaded_to_gpu = (device == "cuda")
+                    except TypeError:
+                        # device parameter not supported, load to CPU then move to GPU
+                        state_dict = safetensors.torch.load_file(str(lora_file))
+                        if device == "cuda" and torch.cuda.is_available():
+                            # Move all tensors to GPU immediately
+                            state_dict = {k: v.cuda() if isinstance(v, torch.Tensor) else v 
+                                        for k, v in state_dict.items()}
+                            loaded_to_gpu = True
+                        else:
+                            loaded_to_gpu = False
+                    
+                    elapsed = time.time() - start_time
+                    num_keys = len(state_dict)
+                    file_size_mb = lora_file.stat().st_size / (1024 * 1024)
+                    
+                    print(f"   ✅ LoRA loaded ({num_keys} keys, {file_size_mb:.2f} MB) in {elapsed:.2f}s", flush=True)
+                    if loaded_to_gpu:
+                        print(f"   🚀 Loaded directly to GPU (optimized path)", flush=True)
+                    
+                    return state_dict
+                    
+                except Exception as e:
+                    print(f"   ⚠️  Error loading safetensors: {e}", flush=True)
+                    print(f"   Falling back to original method", flush=True)
+                    return original_lora_state_dict(lora_path, *args, **kwargs)
+            
+            # Apply monkey patch
+            CustomFluxPipeline.lora_state_dict = optimized_lora_state_dict
+            print("✅ Applied LoRA loading optimization: safetensors + direct GPU loading")
+            
+    except ImportError as e:
+        print(f"⚠️  Warning: Could not apply LoRA loading optimization: {e}")
+        print("   LoRA loading will use default method (may be slower)")
+    except Exception as e:
+        print(f"⚠️  Warning: Error applying LoRA loading optimization: {e}")
+        print("   LoRA loading will use default method (may be slower)")
+
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
@@ -253,60 +363,157 @@ def main() -> int:
     except ImportError:
         pass  # torch check already done above
 
-    # Load config first to check if we should use pipeline dataset
+    # Load config
     config = cld_infer.load_config(str(config_path))
     
-    # Check if we should use pipeline dataset instead of LayoutTrainDataset
-    use_pipeline_dataset = config.get("use_pipeline_dataset", False)
+    # Import necessary functions from cld_infer module
+    initialize_pipeline = cld_infer.initialize_pipeline
+    get_input_box = cld_infer.get_input_box
     
-    if use_pipeline_dataset:
-        # Import PipelineDataset from our custom dataset module
-        # Need to add repo_root/src to path to import our custom dataset
-        repo_root_src = repo_root / "src"
-        if str(repo_root_src) not in sys.path:
-            sys.path.insert(0, str(repo_root_src))
+    # Import seed_everything from tools.tools (it's imported in infer.py but not exposed as attribute)
+    from tools.tools import seed_everything
+    
+    # Import PipelineDataset - we always use it to avoid downloading HuggingFace datasets
+    repo_root_src = repo_root / "src"
+    if str(repo_root_src) not in sys.path:
+        sys.path.insert(0, str(repo_root_src))
+    
+    from data.custom_cld_dataset import PipelineDataset, collate_fn_pipeline
+    
+    # Import other dependencies
+    import torch
+    import numpy as np
+    from PIL import Image
+    from torch.utils.data import DataLoader
+    
+    # Implement our own inference_layout that uses PipelineDataset
+    # This avoids calling cld_infer.inference_layout which would use LayoutTrainDataset
+    # and download the entire HuggingFace dataset
+    @torch.no_grad()
+    def inference_layout_pipeline(config):
+        """Custom inference_layout that uses PipelineDataset instead of LayoutTrainDataset."""
+        if config.get('seed') is not None:
+            seed_everything(config['seed'])
         
-        from data.custom_cld_dataset import PipelineDataset, collate_fn_pipeline
+        os.makedirs(config['save_dir'], exist_ok=True)
+        os.makedirs(os.path.join(config['save_dir'], "merged"), exist_ok=True)
+        os.makedirs(os.path.join(config['save_dir'], "merged_rgba"), exist_ok=True)
+
+        # Load transparent VAE
+        print("[INFO] Loading Transparent VAE...", flush=True)
         
-        # Monkey patch tools.dataset module to replace LayoutTrainDataset with PipelineDataset
-        # This way, when infer.py does `from tools.dataset import LayoutTrainDataset`,
-        # it will actually get our PipelineDataset
-        import tools.dataset as dataset_module
+        import argparse
+        from models.transp_vae import AutoencoderKLTransformerTraining as CustomVAE
         
-        # Store original LayoutTrainDataset for fallback
-        original_LayoutTrainDataset = dataset_module.LayoutTrainDataset
-        original_collate_fn = dataset_module.collate_fn
-        
-        # Create a closure to capture config for max_image_side and max_image_size
-        def create_patched_LayoutTrainDataset(config_ref):
-            """Factory function to create a patched LayoutTrainDataset that uses PipelineDataset."""
-            class LayoutTrainDatasetWrapper:
-                """Wrapper that makes PipelineDataset compatible with LayoutTrainDataset interface."""
-                def __init__(self, data_dir, split="test"):
-                    # Ignore split parameter (PipelineDataset doesn't use it)
-                    # Get max_image_side and max_image_size from config
-                    self.dataset = PipelineDataset(
-                        data_dir=data_dir,
-                        max_image_side=config_ref.get('max_image_side'),
-                        max_image_size=config_ref.get('max_image_size'),
-                    )
-                
-                def __len__(self):
-                    return len(self.dataset)
-                
-                def __getitem__(self, idx):
-                    return self.dataset[idx]
+        vae_args = argparse.Namespace(
+            max_layers=config.get('max_layers', 48),
+            decoder_arch=config.get('decoder_arch', 'vit'),
+            pos_embedding=config.get('pos_embedding', 'rope'),
+            layer_embedding=config.get('layer_embedding', 'rope'),
+            single_layer_decoder=config.get('single_layer_decoder', None)
+        )
+        transp_vae = CustomVAE(vae_args)
+        transp_vae_path = config.get('transp_vae_path')
+        transp_vae_weights = torch.load(transp_vae_path, map_location=torch.device("cuda"))
+        missing_keys, unexpected_keys = transp_vae.load_state_dict(transp_vae_weights['model'], strict=False)
+        if missing_keys or unexpected_keys:
+            print(f"[WARNING] Missing keys: {missing_keys}, Unexpected keys: {unexpected_keys}")
+        transp_vae.eval()
+        transp_vae = transp_vae.to(torch.device("cuda"))
+        print("[INFO] Transparent VAE loaded successfully.", flush=True)
+
+        pipeline = initialize_pipeline(config)
+
+        # Use PipelineDataset instead of LayoutTrainDataset
+        print("[INFO] Loading dataset using PipelineDataset (no HuggingFace download)...", flush=True)
+        dataset = PipelineDataset(
+            data_dir=config['data_dir'],
+            max_image_side=config.get('max_image_side'),
+            max_image_size=config.get('max_image_size'),
+        )
+        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_fn_pipeline)
+
+        generator = torch.Generator(device=torch.device("cuda")).manual_seed(config.get('seed', 42))
+
+        idx = 0
+        for batch in loader:
+            print(f"Processing case {idx}", flush=True)
+
+            height = int(batch["height"][0])
+            width = int(batch["width"][0])
+            adapter_img = batch["whole_img"][0]
+            caption = batch["caption"][0]
+            layer_boxes = get_input_box(batch["layout"][0]) 
+
+            # Generate layers using pipeline
+            x_hat, image, latents = pipeline(
+                prompt=caption,
+                adapter_image=adapter_img,
+                adapter_conditioning_scale=0.9,
+                validation_box=layer_boxes,
+                generator=generator,
+                height=height,
+                width=width,
+                guidance_scale=config.get('cfg', 4.0),
+                num_layers=len(layer_boxes),
+                sdxl_vae=transp_vae,  # Use transparent VAE
+            )
+
+            # Adjust x_hat range from [-1, 1] to [0, 1]
+            x_hat = (x_hat + 1) / 2
+
+            # Remove batch dimension and ensure float32 dtype
+            x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).to(torch.float32)
             
-            return LayoutTrainDatasetWrapper
-        
-        # Replace LayoutTrainDataset with patched version that uses config
-        dataset_module.LayoutTrainDataset = create_patched_LayoutTrainDataset(config)
-        dataset_module.collate_fn = collate_fn_pipeline
-        
-        print("✅ Patched tools.dataset to use PipelineDataset instead of LayoutTrainDataset")
+            this_index = f"case_{idx}"
+            case_dir = os.path.join(config['save_dir'], this_index)
+            os.makedirs(case_dir, exist_ok=True)
+            
+            # Save whole image_RGBA (X_hat[0]) and background_RGBA (X_hat[1])
+            whole_image_layer = (x_hat[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            whole_image_rgba_image = Image.fromarray(whole_image_layer, "RGBA")
+            whole_image_rgba_image.save(os.path.join(case_dir, "whole_image_rgba.png"))
+
+            adapter_img.save(os.path.join(case_dir, "origin.png"))
+
+            background_layer = (x_hat[1].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            background_rgba_image = Image.fromarray(background_layer, "RGBA")
+            background_rgba_image.save(os.path.join(case_dir, "background_rgba.png"))
+
+            x_hat = x_hat[2:]
+            merged_image = image[1]
+            image = image[2:]
+
+            # Save transparent VAE decoded results
+            for layer_idx in range(x_hat.shape[0]):
+                layer = x_hat[layer_idx]
+                rgba_layer = (layer.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                rgba_image = Image.fromarray(rgba_layer, "RGBA")
+                rgba_image.save(os.path.join(case_dir, f"layer_{layer_idx}_rgba.png"))
+
+            # Composite background and foreground layers
+            for layer_idx in range(x_hat.shape[0]):
+                rgba_layer = (x_hat[layer_idx].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                layer_image = Image.fromarray(rgba_layer, "RGBA")
+                merged_image = Image.alpha_composite(merged_image.convert('RGBA'), layer_image)
+            
+            # Save final composite images
+            merged_image.convert('RGB').save(os.path.join(config['save_dir'], "merged", f"{this_index}.png"))
+            merged_image.convert('RGB').save(os.path.join(case_dir, f"{this_index}.png"))
+            # Save final composite RGBA image
+            merged_image.save(os.path.join(config['save_dir'], "merged_rgba", f"{this_index}.png"))
+
+            print(f"Saved case {idx} to {case_dir}")
+            idx += 1
+
+        del pipeline
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
-    # Call inference_layout (will use patched dataset if use_pipeline_dataset=True)
-    cld_infer.inference_layout(config)
+    # Always use our custom inference_layout that uses PipelineDataset
+    # This avoids downloading HuggingFace datasets
+    print("✅ Using custom inference_layout with PipelineDataset (no HuggingFace download)")
+    inference_layout_pipeline(config)
     return 0
 
 
