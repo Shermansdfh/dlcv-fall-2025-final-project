@@ -89,57 +89,54 @@ def run_step4_cld(
         # The CLD conda environment should have torch installed
         pass
     
-    # Prepare environment variables to pass to subprocess
-    # conda run may reset some environment variables, so we need to ensure CUDA-related ones are preserved
-    env = os.environ.copy()
+    # Use conda activate instead of conda run for CLD inference
+    # This is necessary because conda run has issues with CUDA device visibility
+    # We'll use bash -c to execute conda activate in a shell
     
-    # Collect CUDA-related environment variables that need to be preserved
-    cuda_env_vars = {}
-    cuda_env_var_names = [
-        "CUDA_VISIBLE_DEVICES",
-        "CUDA_DEVICE_ORDER",
-        "NVIDIA_VISIBLE_DEVICES",
-        "NVIDIA_DRIVER_CAPABILITIES",
-        "LD_LIBRARY_PATH",  # May contain CUDA library paths
-    ]
-    for var in cuda_env_var_names:
-        if var in os.environ:
-            cuda_env_vars[var] = os.environ[var]
-            env[var] = os.environ[var]
-    
-    # Build command: conda run -n <env> python <script> --config_path <cld_infer_config>
-    # Note: conda run may not properly expose CUDA devices, so we pass env vars explicitly
-    cmd = [
-        "conda", "run",
-        "-n", conda_env,
-        "--no-capture-output",
-        "python", str(cld_script),
-        "--config_path", str(cld_infer_config_path)
+    # Find conda initialization script (common locations)
+    conda_init_paths = [
+        Path("/opt/anaconda3/etc/profile.d/conda.sh"),
+        Path("/opt/conda/etc/profile.d/conda.sh"),
+        Path("/usr/local/anaconda3/etc/profile.d/conda.sh"),
+        Path("/usr/local/conda/etc/profile.d/conda.sh"),
+        Path.home() / "anaconda3/etc/profile.d/conda.sh",
+        Path.home() / "miniconda3/etc/profile.d/conda.sh",
+        Path("/workspace/miniconda3/etc/profile.d/conda.sh"),
     ]
     
-    # Pass CUDA-related environment variables to subprocess
-    # This ensures conda run can access CUDA devices
-    if cuda_env_vars:
-        print(f"   Passing CUDA environment variables: {', '.join(cuda_env_vars.keys())}")
+    # Try to find conda.sh
+    conda_sh = None
+    for path in conda_init_paths:
+        if path.exists():
+            conda_sh = path
+            break
+    
+    # Build shell command: source conda.sh && conda activate <env> && python <script> && conda deactivate
+    if conda_sh:
+        shell_cmd = f'source "{conda_sh}" && conda activate {conda_env} && python "{cld_script}" --config_path "{cld_infer_config_path}" && conda deactivate'
+    else:
+        # Fallback: try to use conda shell hook (works if conda is in PATH)
+        shell_cmd = f'eval "$(conda shell.bash hook)" && conda activate {conda_env} && python "{cld_script}" --config_path "{cld_infer_config_path}" && conda deactivate'
     
     print("=" * 60)
     print("STEP 4: CLD Inference")
     print("=" * 60)
-    if cuda_env_vars:
-        print(f"🔧 Running: bash -c \"... conda run ...\"")
-        print(f"   (with CUDA environment variables: {', '.join(cuda_env_vars.keys())})")
-    else:
-        print(f"🔧 Running: {' '.join(cmd)}")
+    print(f"🔧 Running: bash -c \"conda activate {conda_env} && python ...\"")
     print(f"   Environment: {conda_env}")
     print(f"   Pipeline config: {pipeline_config_path}")
     print(f"   CLD inference config: {cld_infer_config_path}")
-    if "CUDA_VISIBLE_DEVICES" in cuda_env_vars:
-        print(f"   CUDA_VISIBLE_DEVICES: {cuda_env_vars['CUDA_VISIBLE_DEVICES']}")
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        print(f"   CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
     print()
     
-    # Run command with environment variables
+    # Run command using bash -c
     try:
-        result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT), env=env, shell=bool(cuda_env_vars))
+        result = subprocess.run(
+            ["bash", "-c", shell_cmd],
+            check=True,
+            cwd=str(REPO_ROOT),
+            env=os.environ.copy(),
+        )
         print("\n✅ Step 4 (CLD Inference) completed successfully")
         return 0
     except subprocess.CalledProcessError as e:
@@ -147,14 +144,12 @@ def run_step4_cld(
         print("\n💡 Troubleshooting tips:")
         print("   1. Verify GPU is available: nvidia-smi")
         print("   2. Check CUDA in CLD environment:")
-        print(f"      conda run -n {conda_env} python -c \"import torch; print(f'CUDA available: {{torch.cuda.is_available()}}, Devices: {{torch.cuda.device_count()}}')\"")
-        print("   3. If CUDA is False or device_count is 0 in conda run but True in conda activate:")
-        print("      This is a known issue with 'conda run' - CUDA devices may not be accessible.")
-        print("      Solution: Use 'conda activate' instead:")
         print(f"      conda activate {conda_env}")
-        print(f"      python {cld_script} --config_path {cld_infer_config_path}")
-        print("   4. Ensure CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
-        print("   5. Check that PyTorch with CUDA support is installed in CLD environment")
+        print(f"      python -c \"import torch; print(f'CUDA available: {{torch.cuda.is_available()}}, Devices: {{torch.cuda.device_count()}}')\"")
+        print("   3. Ensure CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
+        print("   4. Check that PyTorch with CUDA support is installed in CLD environment")
+        print("   5. If conda.sh not found, ensure conda is properly initialized:")
+        print("      source ~/.bashrc  # or source /opt/anaconda3/etc/profile.d/conda.sh")
         return e.returncode
     except FileNotFoundError:
         print(f"\n❌ Conda not found. Please ensure conda is installed and in PATH")
