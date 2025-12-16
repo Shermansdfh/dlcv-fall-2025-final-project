@@ -643,7 +643,28 @@ def main() -> int:
             width = int(batch["width"][0])
             adapter_img = batch["whole_img"][0]
             caption = batch["caption"][0]
-            layer_boxes = get_input_box(batch["layout"][0]) 
+            
+            # Debug: Check layout before quantization
+            raw_layout = batch["layout"][0]
+            print(f"\n[DEBUG] Case {idx}: Layout validation", flush=True)
+            print(f"  Image size: {width}x{height}", flush=True)
+            print(f"  Raw layout count: {len(raw_layout)}", flush=True)
+            print(f"  Raw layout[0] (should be full image): {raw_layout[0] if len(raw_layout) > 0 else 'N/A'}", flush=True)
+            if len(raw_layout) > 1:
+                print(f"  Raw layout[1] (background): {raw_layout[1]}", flush=True)
+            if len(raw_layout) > 2:
+                print(f"  Raw layout[2:] (foreground): {raw_layout[2:]}", flush=True)
+            
+            layer_boxes = get_input_box(batch["layout"][0])
+            
+            # Debug: Check quantized layer_boxes
+            print(f"  Quantized layer_boxes count: {len(layer_boxes)}", flush=True)
+            print(f"  layer_boxes[0] (whole_image): {layer_boxes[0] if len(layer_boxes) > 0 else 'N/A'}", flush=True)
+            if len(layer_boxes) > 1:
+                print(f"  layer_boxes[1] (background): {layer_boxes[1]}", flush=True)
+            if len(layer_boxes) > 2:
+                print(f"  layer_boxes[2:] (foreground): {layer_boxes[2:]}", flush=True)
+            print(f"  num_layers to pass: {len(layer_boxes)}", flush=True)
             
             # Clear batch from memory before pipeline call
             del batch
@@ -651,6 +672,7 @@ def main() -> int:
                 torch.cuda.empty_cache()
 
             # Generate layers using pipeline
+            print(f"[DEBUG] Calling pipeline with validation_box={len(layer_boxes)} boxes...", flush=True)
             x_hat, image, latents = pipeline(
                 prompt=caption,
                 adapter_image=adapter_img,
@@ -663,6 +685,15 @@ def main() -> int:
                 num_layers=len(layer_boxes),
                 sdxl_vae=transp_vae,  # Use transparent VAE
             )
+            
+            # Debug: Check pipeline output
+            print(f"[DEBUG] Pipeline output:", flush=True)
+            print(f"  x_hat shape: {x_hat.shape} (expected: [1, num_layers, 4, H, W])", flush=True)
+            print(f"  x_hat layers: {x_hat.shape[1] if len(x_hat.shape) > 1 else 'N/A'} (expected: {len(layer_boxes)})", flush=True)
+            if isinstance(image, (list, tuple)):
+                print(f"  image length: {len(image)} (expected: {len(layer_boxes)})", flush=True)
+            else:
+                print(f"  image type: {type(image)}", flush=True)
 
             # Adjust x_hat range from [-1, 1] to [0, 1]
             x_hat = (x_hat + 1) / 2
@@ -707,24 +738,46 @@ def main() -> int:
             image = image[2:]
 
             # Save transparent VAE decoded results
+            # Note: transparent VAE should already generate proper RGBA with alpha channel
+            # x_hat[2:] corresponds to foreground layers (after whole_image and background)
+            print(f"[DEBUG] Saving {x_hat.shape[0]} foreground layers...", flush=True)
             for layer_idx in range(x_hat.shape[0]):
-                layer = x_hat[layer_idx]  # Already on CPU
+                layer = x_hat[layer_idx]  # Already on CPU, shape: [4, H, W] (RGBA)
                 rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                
+                # Debug: Check alpha channel statistics for this layer
+                alpha_channel = rgba_layer[:, :, 3]
+                alpha_min, alpha_max = alpha_channel.min(), alpha_channel.max()
+                alpha_mean = alpha_channel.mean()
+                transparent_pixels = (alpha_channel == 0).sum()
+                total_pixels = alpha_channel.size
+                transparent_ratio = transparent_pixels / total_pixels * 100
+                
+                # Get corresponding box for this layer
+                if layer_idx < len(layer_boxes) - 2:  # -2 because we skip whole_image and background
+                    corresponding_box = layer_boxes[layer_idx + 2]  # +2 because layer_boxes[0] and [1] are whole_image and background
+                    x1, y1, x2, y2 = corresponding_box
+                    box_area = (x2 - x1) * (y2 - y1)
+                    print(f"  Layer {layer_idx}: box={corresponding_box}, box_area={box_area}, "
+                          f"alpha_range=[{alpha_min}, {alpha_max}], alpha_mean={alpha_mean:.1f}, "
+                          f"transparent={transparent_ratio:.1f}%", flush=True)
+                else:
+                    print(f"  Layer {layer_idx}: alpha_range=[{alpha_min}, {alpha_max}], alpha_mean={alpha_mean:.1f}, "
+                          f"transparent={transparent_ratio:.1f}%", flush=True)
+                
                 # Pillow can auto-detect RGBA format from shape [H, W, 4]
-                rgba_image = Image.fromarray(rgba_layer)
+                rgba_image = Image.fromarray(rgba_layer, mode='RGBA')
                 rgba_image.save(os.path.join(case_dir, f"layer_{layer_idx}_rgba.png"))
                 # Clean up immediately after saving
                 del layer, rgba_layer, rgba_image
 
             # Composite background and foreground layers
             for layer_idx in range(x_hat.shape[0]):
-                layer = x_hat[layer_idx]  # Already on CPU
-                rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-                # Pillow can auto-detect RGBA format from shape [H, W, 4]
-                layer_image = Image.fromarray(rgba_layer)
+                rgba_layer = (x_hat[layer_idx].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                layer_image = Image.fromarray(rgba_layer, mode='RGBA')
                 merged_image = Image.alpha_composite(merged_image.convert('RGBA'), layer_image)
                 # Clean up immediately
-                del layer, rgba_layer, layer_image
+                del rgba_layer, layer_image
             
             # Save final composite images
             merged_image.convert('RGB').save(os.path.join(config['save_dir'], "merged", f"{this_index}.png"))
