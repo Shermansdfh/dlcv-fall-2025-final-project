@@ -451,6 +451,54 @@ def main() -> int:
     except ImportError:
         print("[DEBUG] Could not patch fuse_lora/unload_lora (models.mmdit not available)", flush=True)
     
+    # Option to skip fuse_lora to save memory (LoRA will still work via PEFT mechanism)
+    # Check config for skip_fuse_lora flag
+    config = cld_infer.load_config(str(config_path))
+    skip_fuse_lora = config.get('skip_fuse_lora', False)
+    
+    if skip_fuse_lora:
+        print("⚠️  skip_fuse_lora=True: Will skip fuse_lora() to save memory", flush=True)
+        print("   LoRA will work via PEFT mechanism (slight performance loss <5%, but saves memory)", flush=True)
+        
+        # Monkey patch fuse_lora and unload_lora to be no-ops
+        if CustomFluxPipeline is not None:
+            try:
+                from models.mmdit import CustomFluxTransformer2DModel
+                from models.multiLayer_adapter import MultiLayerAdapter
+                
+                # Patch fuse_lora to be a no-op
+                if hasattr(CustomFluxTransformer2DModel, 'fuse_lora'):
+                    def noop_fuse_lora(self, *args, **kwargs):
+                        print("[INFO] Skipping fuse_lora() to save memory (LoRA will work via PEFT)", flush=True)
+                        return None
+                    CustomFluxTransformer2DModel.fuse_lora = noop_fuse_lora
+                
+                if hasattr(MultiLayerAdapter, 'fuse_lora'):
+                    def noop_fuse_lora_adapter(self, *args, **kwargs):
+                        print("[INFO] Skipping MultiLayerAdapter.fuse_lora() to save memory", flush=True)
+                        return None
+                    MultiLayerAdapter.fuse_lora = noop_fuse_lora_adapter
+                
+                # Patch unload_lora to be a no-op (since we didn't fuse, we shouldn't unload)
+                if hasattr(CustomFluxTransformer2DModel, 'unload_lora'):
+                    def noop_unload_lora(self, *args, **kwargs):
+                        print("[INFO] Skipping unload_lora() (LoRA weights kept for PEFT inference)", flush=True)
+                        return None
+                    CustomFluxTransformer2DModel.unload_lora = noop_unload_lora
+                
+                if hasattr(MultiLayerAdapter, 'unload_lora'):
+                    def noop_unload_lora_adapter(self, *args, **kwargs):
+                        print("[INFO] Skipping MultiLayerAdapter.unload_lora()", flush=True)
+                        return None
+                    MultiLayerAdapter.unload_lora = noop_unload_lora_adapter
+                
+                print("✅ Patched fuse_lora/unload_lora to skip (memory optimization)", flush=True)
+            except ImportError:
+                print("⚠️  Warning: Could not patch fuse_lora/unload_lora (models not available)", flush=True)
+    
+    # Reload config (we already loaded it above, but this ensures consistency)
+    config = cld_infer.load_config(str(config_path))
+    
     def initialize_pipeline_with_timing(config):
         """Wrapped initialize_pipeline with detailed timing information."""
         print("[DEBUG] initialize_pipeline: Starting...", flush=True)

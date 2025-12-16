@@ -31,5 +31,5 @@ save_dir: "../../outputs/pipeline_outputs/cld_inference"
 # Inference parameters
 cfg: 4.0  # Guidance scale
 num_inference_steps: 28
-
+skip_fuse_lora: true
 
