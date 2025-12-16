@@ -235,17 +235,33 @@ def main() -> int:
                 try:
                     # Load safetensors - try direct GPU loading first, fallback to CPU then move to GPU
                     # safetensors.torch.load_file returns a dict of tensors
+                    load_start = time.time()
                     try:
                         # Try loading directly to GPU if device parameter is supported
                         state_dict = safetensors.torch.load_file(str(lora_file), device=device)
+                        load_elapsed = time.time() - load_start
                         loaded_to_gpu = (device == "cuda")
+                        print(f"   ⏱️  Safetensors I/O: {load_elapsed:.2f}s", flush=True)
                     except TypeError:
                         # device parameter not supported, load to CPU then move to GPU
                         state_dict = safetensors.torch.load_file(str(lora_file))
+                        load_elapsed = time.time() - load_start
+                        print(f"   ⏱️  Safetensors I/O (CPU): {load_elapsed:.2f}s", flush=True)
+                        
                         if device == "cuda" and torch.cuda.is_available():
-                            # Move all tensors to GPU immediately
-                            state_dict = {k: v.cuda() if isinstance(v, torch.Tensor) else v 
-                                        for k, v in state_dict.items()}
+                            # Move all tensors to GPU efficiently
+                            # Batch move for better performance (avoids multiple small transfers)
+                            move_start = time.time()
+                            # Collect all tensors first, then move them in batch
+                            tensor_keys = [k for k, v in state_dict.items() if isinstance(v, torch.Tensor)]
+                            if tensor_keys:
+                                # Use non_blocking=True for async transfer, but we'll sync at the end
+                                for k in tensor_keys:
+                                    state_dict[k] = state_dict[k].cuda(non_blocking=True)
+                                # Synchronize to ensure all transfers complete before returning
+                                torch.cuda.synchronize()
+                            move_elapsed = time.time() - move_start
+                            print(f"   ⏱️  CPU->GPU transfer ({len(tensor_keys)} tensors): {move_elapsed:.2f}s", flush=True)
                             loaded_to_gpu = True
                         else:
                             loaded_to_gpu = False
@@ -254,7 +270,7 @@ def main() -> int:
                     num_keys = len(state_dict)
                     file_size_mb = lora_file.stat().st_size / (1024 * 1024)
                     
-                    print(f"   ✅ LoRA loaded ({num_keys} keys, {file_size_mb:.2f} MB) in {elapsed:.2f}s", flush=True)
+                    print(f"   ✅ LoRA loaded ({num_keys} keys, {file_size_mb:.2f} MB) in {elapsed:.2f}s total", flush=True)
                     if loaded_to_gpu:
                         print(f"   🚀 Loaded directly to GPU (optimized path)", flush=True)
                     
@@ -267,7 +283,7 @@ def main() -> int:
             
             # Apply monkey patch
             CustomFluxPipeline.lora_state_dict = optimized_lora_state_dict
-            print("✅ Applied LoRA loading optimization: safetensors + direct GPU loading")
+            print("✅ Applied LoRA loading optimization: safetensors + direct GPU loading", flush=True)
             
     except ImportError as e:
         print(f"⚠️  Warning: Could not apply LoRA loading optimization: {e}")
