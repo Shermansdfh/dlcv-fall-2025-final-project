@@ -698,6 +698,26 @@ def main() -> int:
             merged_image.save(os.path.join(config['save_dir'], "merged_rgba", f"{this_index}.png"))
 
             print(f"Saved case {idx} to {case_dir}")
+            
+            # Clean up VRAM after each image to prevent memory accumulation
+            # Delete intermediate tensors and variables to free GPU memory
+            try:
+                del x_hat, image, latents
+            except NameError:
+                pass
+            
+            # Clear CUDA cache to free up fragmented memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                # Synchronize to ensure cleanup completes before next iteration
+                torch.cuda.synchronize()
+            
+            # Optional: Print memory usage for monitoring
+            if torch.cuda.is_available() and idx % 5 == 0:  # Print every 5 images
+                allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+                print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved", flush=True)
+            
             idx += 1
 
         del pipeline
