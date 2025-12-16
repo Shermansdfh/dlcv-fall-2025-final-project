@@ -168,15 +168,23 @@ def main() -> int:
 
     # Optimize LoRA loading: Monkey patch CustomFluxPipeline.lora_state_dict AFTER loading cld_infer module
     # This ensures LoRA weights are loaded directly to GPU using safetensors for faster loading
+    print("[DEBUG] Starting LoRA optimization setup...", flush=True)
     try:
         import torch
         import time
         
         # Import CustomFluxPipeline from the loaded module
+        # This import may be slow if models.pipeline is large
+        print("[DEBUG] Importing CustomFluxPipeline (this may take a moment)...", flush=True)
+        import_start = time.time()
         from models.pipeline import CustomFluxPipeline
+        import_elapsed = time.time() - import_start
+        print(f"[DEBUG] CustomFluxPipeline imported in {import_elapsed:.2f}s", flush=True)
         
         # Store original lora_state_dict method
+        print("[DEBUG] Checking for lora_state_dict method...", flush=True)
         if hasattr(CustomFluxPipeline, 'lora_state_dict'):
+            print("[DEBUG] Found lora_state_dict, creating optimized version...", flush=True)
             original_lora_state_dict = CustomFluxPipeline.lora_state_dict
             
             @staticmethod
@@ -282,8 +290,11 @@ def main() -> int:
                     return original_lora_state_dict(lora_path, *args, **kwargs)
             
             # Apply monkey patch
+            print("[DEBUG] About to apply monkey patch to CustomFluxPipeline.lora_state_dict...", flush=True)
             CustomFluxPipeline.lora_state_dict = optimized_lora_state_dict
+            print("[DEBUG] Monkey patch applied successfully", flush=True)
             print("✅ Applied LoRA loading optimization: safetensors + direct GPU loading", flush=True)
+            print("[DEBUG] Finished LoRA optimization setup", flush=True)
             
     except ImportError as e:
         print(f"⚠️  Warning: Could not apply LoRA loading optimization: {e}")
@@ -438,7 +449,9 @@ def main() -> int:
         transp_vae = transp_vae.to(torch.device("cuda"))
         print("[INFO] Transparent VAE loaded successfully.", flush=True)
 
+        print("[DEBUG] About to call initialize_pipeline (LoRA optimization should be active)...", flush=True)
         pipeline = initialize_pipeline(config)
+        print("[DEBUG] initialize_pipeline completed", flush=True)
 
         # Use PipelineDataset instead of LayoutTrainDataset
         print("[INFO] Loading dataset using PipelineDataset (no HuggingFace download)...", flush=True)
