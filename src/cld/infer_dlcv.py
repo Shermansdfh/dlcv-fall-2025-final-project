@@ -169,6 +169,7 @@ def main() -> int:
     # Optimize LoRA loading: Monkey patch CustomFluxPipeline.lora_state_dict AFTER loading cld_infer module
     # This ensures LoRA weights are loaded directly to GPU using safetensors for faster loading
     print("[DEBUG] Starting LoRA optimization setup...", flush=True)
+    CustomFluxPipeline = None  # Will be set in try block
     try:
         import torch
         import time
@@ -394,8 +395,74 @@ def main() -> int:
     config = cld_infer.load_config(str(config_path))
     
     # Import necessary functions from cld_infer module
-    initialize_pipeline = cld_infer.initialize_pipeline
+    original_initialize_pipeline = cld_infer.initialize_pipeline
     get_input_box = cld_infer.get_input_box
+    
+    # Wrap initialize_pipeline with timing and debug info
+    # Also monkey patch key operations to track timing
+    import time
+    
+    # Monkey patch load_lora_into_transformer, fuse_lora, unload_lora to add timing
+    # Only if CustomFluxPipeline was successfully imported
+    if CustomFluxPipeline is not None and hasattr(CustomFluxPipeline, 'load_lora_into_transformer'):
+        original_load_lora = CustomFluxPipeline.load_lora_into_transformer
+        
+        @staticmethod
+        def timed_load_lora_into_transformer(lora_state_dict, *args, **kwargs):
+            print("[DEBUG] load_lora_into_transformer: Starting...", flush=True)
+            start = time.time()
+            result = original_load_lora(lora_state_dict, *args, **kwargs)
+            elapsed = time.time() - start
+            print(f"[DEBUG] load_lora_into_transformer: Completed in {elapsed:.2f}s", flush=True)
+            return result
+        
+        CustomFluxPipeline.load_lora_into_transformer = timed_load_lora_into_transformer
+    
+    # Patch fuse_lora and unload_lora on transformer objects
+    # We'll patch them on the CustomFluxTransformer2DModel class
+    try:
+        from models.mmdit import CustomFluxTransformer2DModel
+        
+        if hasattr(CustomFluxTransformer2DModel, 'fuse_lora'):
+            original_fuse_lora = CustomFluxTransformer2DModel.fuse_lora
+            
+            def timed_fuse_lora(self, *args, **kwargs):
+                print("[DEBUG] fuse_lora: Starting...", flush=True)
+                start = time.time()
+                result = original_fuse_lora(self, *args, **kwargs)
+                elapsed = time.time() - start
+                print(f"[DEBUG] fuse_lora: Completed in {elapsed:.2f}s", flush=True)
+                return result
+            
+            CustomFluxTransformer2DModel.fuse_lora = timed_fuse_lora
+        
+        if hasattr(CustomFluxTransformer2DModel, 'unload_lora'):
+            original_unload_lora = CustomFluxTransformer2DModel.unload_lora
+            
+            def timed_unload_lora(self, *args, **kwargs):
+                print("[DEBUG] unload_lora: Starting...", flush=True)
+                start = time.time()
+                result = original_unload_lora(self, *args, **kwargs)
+                elapsed = time.time() - start
+                print(f"[DEBUG] unload_lora: Completed in {elapsed:.2f}s", flush=True)
+                return result
+            
+            CustomFluxTransformer2DModel.unload_lora = timed_unload_lora
+    except ImportError:
+        print("[DEBUG] Could not patch fuse_lora/unload_lora (models.mmdit not available)", flush=True)
+    
+    def initialize_pipeline_with_timing(config):
+        """Wrapped initialize_pipeline with detailed timing information."""
+        print("[DEBUG] initialize_pipeline: Starting...", flush=True)
+        total_start = time.time()
+        
+        print("[DEBUG] initialize_pipeline: Calling original function...", flush=True)
+        result = original_initialize_pipeline(config)
+        total_elapsed = time.time() - total_start
+        print(f"[DEBUG] initialize_pipeline: Completed in {total_elapsed:.2f}s total", flush=True)
+        return result
+    
+    initialize_pipeline = initialize_pipeline_with_timing
     
     # Import seed_everything from tools.tools (it's imported in infer.py but not exposed as attribute)
     from tools.tools import seed_everything
