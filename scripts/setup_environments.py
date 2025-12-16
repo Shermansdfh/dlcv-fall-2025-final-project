@@ -217,9 +217,12 @@ def setup_llava(force: bool = False) -> int:
         print("   Please ensure third_party/llava submodule is initialized")
         return 1
     
+    # Check for either pyproject.toml or setup.py (both work with pip install -e .)
+    pyproject_toml = llava_dir / "pyproject.toml"
     setup_py = llava_dir / "setup.py"
-    if not setup_py.exists():
-        print(f"❌ LLaVA setup.py not found: {setup_py}")
+    if not pyproject_toml.exists() and not setup_py.exists():
+        print(f"❌ LLaVA package file not found: neither pyproject.toml nor setup.py exists")
+        print(f"   Expected one of: {pyproject_toml} or {setup_py}")
         return 1
     
     # Check if environment already exists

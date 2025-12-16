@@ -57,6 +57,23 @@ def main() -> int:
 
     # Don't hardcode CUDA_VISIBLE_DEVICES here, leave it to scheduler/launcher
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    
+    # Check CUDA availability before proceeding
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            print("❌ CUDA is not available in this environment")
+            print("   CLD inference requires GPU. Please ensure:")
+            print("   1. GPU is available: nvidia-smi")
+            print("   2. PyTorch with CUDA support is installed")
+            print("   3. CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
+            print("\n   If you're using conda run, try activating the environment directly:")
+            print(f"   conda activate CLD")
+            print(f"   python {Path(__file__).resolve()} --config_path <config>")
+            return 1
+    except ImportError:
+        print("⚠️  Warning: torch not found. CUDA availability cannot be checked.")
+        print("   Proceeding anyway, but CLD inference will likely fail without GPU.")
 
     this_file = Path(__file__).resolve()
     repo_root = _find_repo_root(this_file.parent)

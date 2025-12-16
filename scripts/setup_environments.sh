@@ -222,8 +222,9 @@ if [ "$SETUP_LLAVA" = true ]; then
         exit 1
     fi
     
-    if [ ! -f "$LLAVA_DIR/setup.py" ]; then
-        echo -e "${RED}❌ LLaVA setup.py not found${NC}"
+    # Check for either pyproject.toml or setup.py (both work with pip install -e .)
+    if [ ! -f "$LLAVA_DIR/pyproject.toml" ] && [ ! -f "$LLAVA_DIR/setup.py" ]; then
+        echo -e "${RED}❌ LLaVA package file not found: neither pyproject.toml nor setup.py exists${NC}"
         exit 1
     fi
     

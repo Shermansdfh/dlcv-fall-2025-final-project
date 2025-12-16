@@ -7,6 +7,7 @@ This step requires a separate CLD inference config file (e.g., configs/exp001/cl
 """
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -73,31 +74,88 @@ def run_step4_cld(
         print(f"❌ CLD inference script not found: {cld_script}")
         return 1
     
-    # Build command: conda run -n <env> python <script> --config_path <cld_infer_config>
-    cmd = [
-        "conda", "run",
-        "-n", conda_env,
-        "--no-capture-output",  # Show output in real-time
-        "python", str(cld_script),
-        "--config_path", str(cld_infer_config_path)
+    # Check CUDA availability in current environment (if torch is available)
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        if not cuda_available:
+            print("⚠️  Warning: CUDA not available in current environment")
+            print("   CLD inference requires GPU. Please ensure:")
+            print("   1. GPU is available and drivers are installed")
+            print("   2. PyTorch with CUDA support is installed in the CLD conda environment")
+            print("   3. CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
+    except ImportError:
+        # torch not available in current environment, but that's OK
+        # The CLD conda environment should have torch installed
+        pass
+    
+    # Prepare environment variables to pass to subprocess
+    # conda run may reset some environment variables, so we need to ensure CUDA-related ones are preserved
+    env = os.environ.copy()
+    
+    # Collect CUDA-related environment variables that need to be preserved
+    cuda_env_vars = {}
+    cuda_env_var_names = [
+        "CUDA_VISIBLE_DEVICES",
+        "CUDA_DEVICE_ORDER",
+        "NVIDIA_VISIBLE_DEVICES",
+        "NVIDIA_DRIVER_CAPABILITIES",
+        "LD_LIBRARY_PATH",  # May contain CUDA library paths
     ]
+    for var in cuda_env_var_names:
+        if var in os.environ:
+            cuda_env_vars[var] = os.environ[var]
+            env[var] = os.environ[var]
+    
+    # Build command: conda run -n <env> python <script> --config_path <cld_infer_config>
+    # Use shell=True with explicit env var export to ensure conda run sees them
+    if cuda_env_vars:
+        # Build export commands for CUDA env vars
+        export_cmds = " ".join([f"export {k}={v};" for k, v in cuda_env_vars.items()])
+        python_cmd = f"python {cld_script} --config_path {cld_infer_config_path}"
+        full_cmd = f"{export_cmds} conda run -n {conda_env} --no-capture-output {python_cmd}"
+        cmd = ["bash", "-c", full_cmd]
+    else:
+        # No CUDA env vars to preserve, use simple conda run
+        cmd = [
+            "conda", "run",
+            "-n", conda_env,
+            "--no-capture-output",
+            "python", str(cld_script),
+            "--config_path", str(cld_infer_config_path)
+        ]
     
     print("=" * 60)
     print("STEP 4: CLD Inference")
     print("=" * 60)
-    print(f"🔧 Running: {' '.join(cmd)}")
+    if cuda_env_vars:
+        print(f"🔧 Running: bash -c \"... conda run ...\"")
+        print(f"   (with CUDA environment variables: {', '.join(cuda_env_vars.keys())})")
+    else:
+        print(f"🔧 Running: {' '.join(cmd)}")
     print(f"   Environment: {conda_env}")
     print(f"   Pipeline config: {pipeline_config_path}")
     print(f"   CLD inference config: {cld_infer_config_path}")
+    if "CUDA_VISIBLE_DEVICES" in cuda_env_vars:
+        print(f"   CUDA_VISIBLE_DEVICES: {cuda_env_vars['CUDA_VISIBLE_DEVICES']}")
     print()
     
-    # Run command
+    # Run command with environment variables
     try:
-        result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT))
+        result = subprocess.run(cmd, check=True, cwd=str(REPO_ROOT), env=env, shell=bool(cuda_env_vars))
         print("\n✅ Step 4 (CLD Inference) completed successfully")
         return 0
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Step 4 (CLD Inference) failed with exit code {e.returncode}")
+        print("\n💡 Troubleshooting tips:")
+        print("   1. Verify GPU is available: nvidia-smi")
+        print("   2. Check CUDA in CLD environment:")
+        print(f"      conda run -n {conda_env} python -c \"import torch; print(torch.cuda.is_available())\"")
+        print("   3. If CUDA is False in conda run but True in conda activate, try:")
+        print(f"      conda activate {conda_env}")
+        print(f"      python {cld_script} --config_path {cld_infer_config_path}")
+        print("   4. Ensure CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
+        print("   5. Check that PyTorch with CUDA support is installed in CLD environment")
         return e.returncode
     except FileNotFoundError:
         print(f"\n❌ Conda not found. Please ensure conda is installed and in PATH")
