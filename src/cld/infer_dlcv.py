@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import pickle
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -204,17 +205,8 @@ def main() -> int:
             original_torch_load = torch.load
             
             def patched_torch_load(*args, **kwargs):
-                """Patched torch.load that handles CUDA device issues and memory optimization."""
-                # Enable weights_only for security and memory efficiency (PyTorch 1.13+)
-                if 'weights_only' not in kwargs:
-                    try:
-                        kwargs['weights_only'] = True
-                    except TypeError:
-                        # Older PyTorch versions don't support weights_only
-                        pass
-                
-                # If map_location is torch.device("cuda") and device_count() == 0,
-                # change it to load on CPU first
+                """Patched torch.load that handles CUDA device issues, weights_only errors, and memory optimization."""
+                # Handle map_location for CUDA device issues first
                 if "map_location" in kwargs:
                     map_loc = kwargs["map_location"]
                     if isinstance(map_loc, torch.device) and map_loc.type == "cuda":
@@ -233,7 +225,25 @@ def main() -> int:
                                     # If CUDA still not available, return CPU version
                                     pass
                             return result
-                return original_torch_load(*args, **kwargs)
+                
+                # Handle weights_only error (CLD checkpoints contain argparse.Namespace)
+                # Try with weights_only=False if weights_only=True fails
+                weights_only_set = "weights_only" in kwargs
+                if not weights_only_set:
+                    # Default: try weights_only=True first for security
+                    kwargs["weights_only"] = True
+                
+                try:
+                    return original_torch_load(*args, **kwargs)
+                except (pickle.UnpicklingError, RuntimeError) as e:
+                    error_msg = str(e)
+                    # Check if it's a weights_only error
+                    if "weights_only" in error_msg or "Unsupported global" in error_msg or "argparse.Namespace" in error_msg:
+                        # Retry with weights_only=False (CLD checkpoints contain non-standard objects)
+                        kwargs["weights_only"] = False
+                        return original_torch_load(*args, **kwargs)
+                    # Re-raise if it's a different error
+                    raise
             
             # Apply monkey patch
             torch.load = patched_torch_load
