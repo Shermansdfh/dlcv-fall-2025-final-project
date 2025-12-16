@@ -61,7 +61,10 @@ def main() -> int:
     # Check CUDA availability before proceeding
     try:
         import torch
-        if not torch.cuda.is_available():
+        cuda_available = torch.cuda.is_available()
+        cuda_device_count = torch.cuda.device_count() if cuda_available else 0
+        
+        if not cuda_available:
             print("❌ CUDA is not available in this environment")
             print("   CLD inference requires GPU. Please ensure:")
             print("   1. GPU is available: nvidia-smi")
@@ -71,6 +74,22 @@ def main() -> int:
             print(f"   conda activate CLD")
             print(f"   python {Path(__file__).resolve()} --config_path <config>")
             return 1
+        
+        if cuda_device_count == 0:
+            print("❌ CUDA is available but no devices are visible")
+            print("   This can happen when using 'conda run' - CUDA devices may not be accessible.")
+            print("\n   Solutions:")
+            print("   1. Use 'conda activate' instead of 'conda run':")
+            print(f"      conda activate CLD")
+            print(f"      python {Path(__file__).resolve()} --config_path <config>")
+            print("   2. Or ensure CUDA_VISIBLE_DEVICES is set before conda run:")
+            print("      export CUDA_VISIBLE_DEVICES=0")
+            print("      conda run -n CLD python ...")
+            print("   3. Check GPU availability:")
+            print("      nvidia-smi")
+            return 1
+        
+        print(f"✅ CUDA available: {cuda_device_count} device(s)")
     except ImportError:
         print("⚠️  Warning: torch not found. CUDA availability cannot be checked.")
         print("   Proceeding anyway, but CLD inference will likely fail without GPU.")
@@ -103,6 +122,26 @@ def main() -> int:
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
+
+    # Final CUDA check before calling inference_layout
+    # This ensures CUDA is properly initialized in the current process
+    try:
+        import torch
+        if torch.cuda.is_available() and torch.cuda.device_count() == 0:
+            print("\n⚠️  Warning: CUDA is available but no devices are visible.")
+            print("   This may happen with 'conda run' - trying to initialize CUDA context...")
+            # Try to initialize CUDA by creating a tensor
+            try:
+                _ = torch.zeros(1).cuda()
+                print("   ✅ CUDA context initialized successfully")
+            except Exception as e:
+                print(f"   ❌ Failed to initialize CUDA context: {e}")
+                print("\n   Please try:")
+                print("   1. Use 'conda activate' instead of 'conda run'")
+                print("   2. Or ensure CUDA_VISIBLE_DEVICES is set before conda run")
+                return 1
+    except ImportError:
+        pass  # torch check already done above
 
     # Directly reuse CLD's load_config and inference_layout
     config = cld_infer.load_config(str(config_path))

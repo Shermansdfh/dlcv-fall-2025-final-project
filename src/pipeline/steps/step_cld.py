@@ -108,22 +108,19 @@ def run_step4_cld(
             env[var] = os.environ[var]
     
     # Build command: conda run -n <env> python <script> --config_path <cld_infer_config>
-    # Use shell=True with explicit env var export to ensure conda run sees them
+    # Note: conda run may not properly expose CUDA devices, so we pass env vars explicitly
+    cmd = [
+        "conda", "run",
+        "-n", conda_env,
+        "--no-capture-output",
+        "python", str(cld_script),
+        "--config_path", str(cld_infer_config_path)
+    ]
+    
+    # Pass CUDA-related environment variables to subprocess
+    # This ensures conda run can access CUDA devices
     if cuda_env_vars:
-        # Build export commands for CUDA env vars
-        export_cmds = " ".join([f"export {k}={v};" for k, v in cuda_env_vars.items()])
-        python_cmd = f"python {cld_script} --config_path {cld_infer_config_path}"
-        full_cmd = f"{export_cmds} conda run -n {conda_env} --no-capture-output {python_cmd}"
-        cmd = ["bash", "-c", full_cmd]
-    else:
-        # No CUDA env vars to preserve, use simple conda run
-        cmd = [
-            "conda", "run",
-            "-n", conda_env,
-            "--no-capture-output",
-            "python", str(cld_script),
-            "--config_path", str(cld_infer_config_path)
-        ]
+        print(f"   Passing CUDA environment variables: {', '.join(cuda_env_vars.keys())}")
     
     print("=" * 60)
     print("STEP 4: CLD Inference")
@@ -150,8 +147,10 @@ def run_step4_cld(
         print("\n💡 Troubleshooting tips:")
         print("   1. Verify GPU is available: nvidia-smi")
         print("   2. Check CUDA in CLD environment:")
-        print(f"      conda run -n {conda_env} python -c \"import torch; print(torch.cuda.is_available())\"")
-        print("   3. If CUDA is False in conda run but True in conda activate, try:")
+        print(f"      conda run -n {conda_env} python -c \"import torch; print(f'CUDA available: {{torch.cuda.is_available()}}, Devices: {{torch.cuda.device_count()}}')\"")
+        print("   3. If CUDA is False or device_count is 0 in conda run but True in conda activate:")
+        print("      This is a known issue with 'conda run' - CUDA devices may not be accessible.")
+        print("      Solution: Use 'conda activate' instead:")
         print(f"      conda activate {conda_env}")
         print(f"      python {cld_script} --config_path {cld_infer_config_path}")
         print("   4. Ensure CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
