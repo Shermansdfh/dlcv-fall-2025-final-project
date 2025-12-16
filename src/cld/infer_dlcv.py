@@ -630,14 +630,25 @@ def main() -> int:
         generator = torch.Generator(device=torch.device("cuda")).manual_seed(config.get('seed', 42))
 
         idx = 0
+        import gc  # For garbage collection
+        
         for batch in loader:
             print(f"Processing case {idx}", flush=True)
+            
+            # Clear cache before processing each image
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             height = int(batch["height"][0])
             width = int(batch["width"][0])
             adapter_img = batch["whole_img"][0]
             caption = batch["caption"][0]
             layer_boxes = get_input_box(batch["layout"][0]) 
+            
+            # Clear batch from memory before pipeline call
+            del batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             # Generate layers using pipeline
             x_hat, image, latents = pipeline(
@@ -657,22 +668,37 @@ def main() -> int:
             x_hat = (x_hat + 1) / 2
 
             # Remove batch dimension and ensure float32 dtype
-            x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).to(torch.float32)
+            # Move to CPU immediately to free GPU memory
+            x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).cpu().to(torch.float32)
+            
+            # Also move image to CPU
+            if isinstance(image, torch.Tensor):
+                image = image.cpu()
+            elif isinstance(image, (list, tuple)):
+                image = [img.cpu() if isinstance(img, torch.Tensor) else img for img in image]
+            
+            # Delete latents immediately (not needed after this point)
+            del latents
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
             this_index = f"case_{idx}"
             case_dir = os.path.join(config['save_dir'], this_index)
             os.makedirs(case_dir, exist_ok=True)
             
             # Save whole image_RGBA (X_hat[0]) and background_RGBA (X_hat[1])
-            whole_image_layer = (x_hat[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            # x_hat is already on CPU, so no need to call .cpu() again
+            whole_image_layer = (x_hat[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
             whole_image_rgba_image = Image.fromarray(whole_image_layer, "RGBA")
             whole_image_rgba_image.save(os.path.join(case_dir, "whole_image_rgba.png"))
+            del whole_image_layer, whole_image_rgba_image
 
             adapter_img.save(os.path.join(case_dir, "origin.png"))
 
-            background_layer = (x_hat[1].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            background_layer = (x_hat[1].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
             background_rgba_image = Image.fromarray(background_layer, "RGBA")
             background_rgba_image.save(os.path.join(case_dir, "background_rgba.png"))
+            del background_layer, background_rgba_image
 
             x_hat = x_hat[2:]
             merged_image = image[1]
@@ -680,16 +706,21 @@ def main() -> int:
 
             # Save transparent VAE decoded results
             for layer_idx in range(x_hat.shape[0]):
-                layer = x_hat[layer_idx]
-                rgba_layer = (layer.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                layer = x_hat[layer_idx]  # Already on CPU
+                rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
                 rgba_image = Image.fromarray(rgba_layer, "RGBA")
                 rgba_image.save(os.path.join(case_dir, f"layer_{layer_idx}_rgba.png"))
+                # Clean up immediately after saving
+                del layer, rgba_layer, rgba_image
 
             # Composite background and foreground layers
             for layer_idx in range(x_hat.shape[0]):
-                rgba_layer = (x_hat[layer_idx].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+                layer = x_hat[layer_idx]  # Already on CPU
+                rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
                 layer_image = Image.fromarray(rgba_layer, "RGBA")
                 merged_image = Image.alpha_composite(merged_image.convert('RGBA'), layer_image)
+                # Clean up immediately
+                del layer, rgba_layer, layer_image
             
             # Save final composite images
             merged_image.convert('RGB').save(os.path.join(config['save_dir'], "merged", f"{this_index}.png"))
@@ -699,24 +730,30 @@ def main() -> int:
 
             print(f"Saved case {idx} to {case_dir}")
             
-            # Clean up VRAM after each image to prevent memory accumulation
-            # Delete intermediate tensors and variables to free GPU memory
+            # Aggressive VRAM cleanup after each image
+            # Delete all intermediate variables
             try:
-                del x_hat, image, latents
+                del x_hat, image, whole_image_layer, background_layer, rgba_layer, layer_image, merged_image
+                del whole_image_rgba_image, background_rgba_image, rgba_image, layer_image
             except NameError:
                 pass
             
-            # Clear CUDA cache to free up fragmented memory
+            # Force garbage collection
+            gc.collect()
+            
+            # Clear CUDA cache aggressively
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-                # Synchronize to ensure cleanup completes before next iteration
                 torch.cuda.synchronize()
+                # Try to reclaim reserved memory
+                torch.cuda.reset_peak_memory_stats()
             
-            # Optional: Print memory usage for monitoring
-            if torch.cuda.is_available() and idx % 5 == 0:  # Print every 5 images
+            # Print memory usage every image (for debugging)
+            if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated() / 1024**3  # GB
                 reserved = torch.cuda.memory_reserved() / 1024**3  # GB
-                print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved", flush=True)
+                free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(0)) / 1024**3
+                print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {free:.2f} GB free", flush=True)
             
             idx += 1
 
