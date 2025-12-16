@@ -295,6 +295,38 @@ rtdetr:
 
 - **`scripts/download_cld_assets.py`** - 下載 CLD 所需的模型和權重
 
+**設置 HuggingFace Token**：
+
+某些模型（如 FLUX.1-dev）需要 HuggingFace token 才能下載。你可以通過以下方式設置：
+
+1. **使用環境變數**（推薦）：
+```bash
+# 設置環境變數
+export HF_TOKEN="your_huggingface_token_here"
+# 或
+export HUGGINGFACE_HUB_TOKEN="your_huggingface_token_here"
+
+# 然後執行下載
+python scripts/download_cld_assets.py
+```
+
+2. **使用命令行參數**：
+```bash
+python scripts/download_cld_assets.py --hf-token "your_huggingface_token_here"
+```
+
+3. **永久設置**（在 `~/.bashrc` 或 `~/.zshrc` 中）：
+```bash
+echo 'export HF_TOKEN="your_huggingface_token_here"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**獲取 HuggingFace Token**：
+1. 前往 [HuggingFace Settings > Access Tokens](https://huggingface.co/settings/tokens)
+2. 創建新的 token（需要 `read` 權限）
+3. 複製 token 並使用上述方式設置
+
+**執行下載**：
 ```bash
 python scripts/download_cld_assets.py
 ```
@@ -304,6 +336,8 @@ python scripts/download_cld_assets.py
 - ControlNet Inpainting Alpha adapter
 - CLD LoRA 權重
 - Transparent VAE 權重
+
+**注意**：如果沒有設置 token，腳本會顯示警告，某些需要授權的模型可能無法下載。
 
 ### 資料集準備
 
