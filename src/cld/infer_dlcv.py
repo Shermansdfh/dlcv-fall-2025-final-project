@@ -195,6 +195,10 @@ def main() -> int:
                 1. Ensures safetensors format is used
                 2. Loads directly to GPU (cuda)
                 3. Provides progress indication
+                
+                Returns:
+                    - If called by load_lora_into_transformer: state_dict only
+                    - If called by pipeline.load_lora_weights(): (state_dict, network_alphas) tuple
                 """
                 import safetensors.torch
                 
@@ -283,7 +287,10 @@ def main() -> int:
                     if loaded_to_gpu:
                         print(f"   🚀 Loaded directly to GPU (optimized path)", flush=True)
                     
-                    return state_dict
+                    # Always return tuple (state_dict, network_alphas) as expected by load_lora_weights
+                    # load_lora_into_transformer wrapper will handle unpacking
+                    network_alphas = None
+                    return state_dict, network_alphas
                     
                 except Exception as e:
                     print(f"   ⚠️  Error loading safetensors: {e}", flush=True)
@@ -411,6 +418,12 @@ def main() -> int:
         def timed_load_lora_into_transformer(lora_state_dict, *args, **kwargs):
             print("[DEBUG] load_lora_into_transformer: Starting...", flush=True)
             start = time.time()
+            
+            # Handle case where lora_state_dict might be a tuple (from optimized_lora_state_dict)
+            # load_lora_into_transformer expects just the state_dict, not the tuple
+            if isinstance(lora_state_dict, tuple):
+                lora_state_dict, _ = lora_state_dict  # Unpack tuple, ignore network_alphas
+            
             result = original_load_lora(lora_state_dict, *args, **kwargs)
             elapsed = time.time() - start
             print(f"[DEBUG] load_lora_into_transformer: Completed in {elapsed:.2f}s", flush=True)
