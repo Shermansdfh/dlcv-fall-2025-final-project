@@ -122,10 +122,11 @@ def main() -> int:
         import torch
         from diffusers import ModelMixin
         
-        # Store original from_pretrained methods
-        original_modelmixin_from_pretrained = ModelMixin.from_pretrained
+        # Store original from_pretrained method (it's already a classmethod)
+        # We need to get the underlying function to properly wrap it
+        original_modelmixin_from_pretrained_func = ModelMixin.from_pretrained.__func__
         
-        def patched_from_pretrained(cls, *args, **kwargs):
+        def patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
             """Patched from_pretrained that enforces memory optimizations."""
             # Force torch_dtype=bfloat16 if not specified
             if 'torch_dtype' not in kwargs:
@@ -145,10 +146,10 @@ def main() -> int:
             if 'use_safetensors' not in kwargs:
                 kwargs['use_safetensors'] = True
             
-            # Call original method
-            return original_modelmixin_from_pretrained(cls, *args, **kwargs)
+            # Call original method with correct signature
+            return original_modelmixin_from_pretrained_func(cls, pretrained_model_name_or_path, *args, **kwargs)
         
-        # Apply monkey patch
+        # Apply monkey patch as classmethod
         ModelMixin.from_pretrained = classmethod(patched_from_pretrained)
         print("✅ Applied memory optimization patches: torch_dtype=bfloat16, low_cpu_mem_usage=True, use_safetensors=True")
         
