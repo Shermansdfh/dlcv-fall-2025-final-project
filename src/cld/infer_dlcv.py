@@ -123,23 +123,69 @@ def main() -> int:
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
-    # Final CUDA check before calling inference_layout
+    # Final CUDA check and fix before calling inference_layout
     # This ensures CUDA is properly initialized in the current process
     try:
         import torch
+        
         if torch.cuda.is_available() and torch.cuda.device_count() == 0:
             print("\n⚠️  Warning: CUDA is available but no devices are visible.")
-            print("   This may happen with 'conda run' - trying to initialize CUDA context...")
+            print("   This may happen with 'conda run' or in Docker containers without GPU access.")
+            
             # Try to initialize CUDA by creating a tensor
             try:
                 _ = torch.zeros(1).cuda()
                 print("   ✅ CUDA context initialized successfully")
-            except Exception as e:
+            except RuntimeError as e:
                 print(f"   ❌ Failed to initialize CUDA context: {e}")
-                print("\n   Please try:")
-                print("   1. Use 'conda activate' instead of 'conda run'")
-                print("   2. Or ensure CUDA_VISIBLE_DEVICES is set before conda run")
+                print("\n   Solutions:")
+                print("   1. In Docker: Ensure GPU is properly mounted:")
+                print("      docker run --gpus all ...")
+                print("      # or with nvidia-docker:")
+                print("      docker run --runtime=nvidia ...")
+                print("   2. Check GPU availability:")
+                print("      nvidia-smi")
+                print("   3. Set CUDA_VISIBLE_DEVICES before running:")
+                print("      export CUDA_VISIBLE_DEVICES=0")
+                print("   4. Use 'conda activate' instead of 'conda run':")
+                print("      conda activate CLD")
+                print(f"      python {Path(__file__).resolve()} --config_path <config>")
                 return 1
+            
+            # Monkey patch torch.load to handle device_count() == 0 case
+            # This fixes the issue where third_party/cld/infer/infer.py uses
+            # torch.load(..., map_location=torch.device("cuda")) when device_count() == 0
+            # We'll load on CPU first, then move to CUDA if device becomes available
+            original_torch_load = torch.load
+            
+            def patched_torch_load(*args, **kwargs):
+                """Patched torch.load that handles CUDA device issues."""
+                # If map_location is torch.device("cuda") and device_count() == 0,
+                # change it to load on CPU first
+                if "map_location" in kwargs:
+                    map_loc = kwargs["map_location"]
+                    if isinstance(map_loc, torch.device) and map_loc.type == "cuda":
+                        if torch.cuda.device_count() == 0:
+                            # Load on CPU first
+                            kwargs["map_location"] = "cpu"
+                            result = original_torch_load(*args, **kwargs)
+                            # Try to move to CUDA if device becomes available
+                            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                                try:
+                                    if isinstance(result, dict):
+                                        return {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in result.items()}
+                                    elif isinstance(result, torch.Tensor):
+                                        return result.cuda()
+                                except Exception:
+                                    # If CUDA still not available, return CPU version
+                                    pass
+                            return result
+                return original_torch_load(*args, **kwargs)
+            
+            # Apply monkey patch
+            torch.load = patched_torch_load
+            print("   🔧 Applied monkey patch for torch.load to handle CUDA device issues")
+            
     except ImportError:
         pass  # torch check already done above
 
