@@ -97,6 +97,7 @@ finals_repo/
 ├── scripts/             # 工具腳本
 │   ├── setup_environments.py  # 環境設置
 │   ├── download_cld_assets.py # CLD 模型下載
+│   ├── download_testing_data.py # 測試資料下載
 │   └── README_SETUP.md        # 環境設置說明
 ├── third_party/         # 第三方依賴 (git submodules)
 │   ├── cld/            # CLD 模型
@@ -339,6 +340,49 @@ python scripts/download_cld_assets.py
 
 **注意**：如果沒有設置 token，腳本會顯示警告，某些需要授權的模型可能無法下載。
 
+### 測試資料下載
+
+- **`scripts/download_testing_data.py`** - 從 Google Drive 下載測試資料並解壓縮
+
+**使用方法**：
+
+1. **在腳本中設置 File ID**（推薦）：
+   
+   編輯 `scripts/download_testing_data.py`，在第 27 行填寫 Google Drive file ID：
+   ```python
+   DEFAULT_FILE_ID = "YOUR_FILE_ID_HERE"  # 填寫您的 Google Drive file ID
+   ```
+   
+   然後直接運行：
+   ```bash
+   python scripts/download_testing_data.py
+   ```
+
+2. **使用命令行參數**：
+   ```bash
+   # 使用 file ID
+   python scripts/download_testing_data.py --file-id "YOUR_FILE_ID"
+   
+   # 使用完整 URL
+   python scripts/download_testing_data.py --url "https://drive.google.com/uc?id=YOUR_FILE_ID"
+   
+   # 指定輸出目錄
+   python scripts/download_testing_data.py --file-id "YOUR_FILE_ID" --output-dir data/test
+   
+   # 保留下載的壓縮文件
+   python scripts/download_testing_data.py --file-id "YOUR_FILE_ID" --keep-archive
+   ```
+
+**功能**：
+- 自動安裝 `gdown`（如果未安裝）
+- 支援多種壓縮格式：`.zip`, `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`
+- 自動解壓縮到 `data/` 目錄（或指定的輸出目錄）
+- 預設會在下載後刪除壓縮文件（可使用 `--keep-archive` 保留）
+
+**獲取 Google Drive File ID**：
+- 從分享連結中提取：`https://drive.google.com/file/d/FILE_ID_HERE/view`
+- 或從直接下載連結：`https://drive.google.com/uc?id=FILE_ID_HERE`
+
 ### 資料集準備
 
 - **`src/data/dlcv_bbox_dataset.py`** - 準備 RTDETR 訓練資料集
@@ -411,6 +455,7 @@ python -m src.bbox.visualize_bbox_gif \
 - **`setup_environments.py`** - 環境設置（Python）
 - **`setup_environments.sh`** - 環境設置（Shell）
 - **`download_cld_assets.py`** - CLD 模型下載
+- **`download_testing_data.py`** - 測試資料下載（從 Google Drive）
 
 ### `third_party/` - 第三方依賴
 
