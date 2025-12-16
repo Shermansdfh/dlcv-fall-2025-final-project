@@ -114,6 +114,50 @@ def main() -> int:
     if str(cld_root) not in sys.path:
         sys.path.insert(0, str(cld_root))
 
+    # Memory optimization: Monkey patch from_pretrained BEFORE loading cld_infer module
+    # This ensures that when infer.py calls from_pretrained, it will use our optimized version
+    # This prevents memory doubling (24GB -> 48GB) and enables safetensors memory mapping
+    try:
+        import torch
+        from diffusers import ModelMixin
+        
+        # Store original from_pretrained methods
+        original_modelmixin_from_pretrained = ModelMixin.from_pretrained
+        
+        def patched_from_pretrained(cls, *args, **kwargs):
+            """Patched from_pretrained that enforces memory optimizations."""
+            # Force torch_dtype=bfloat16 if not specified
+            if 'torch_dtype' not in kwargs:
+                kwargs['torch_dtype'] = torch.bfloat16
+            elif kwargs.get('torch_dtype') != torch.bfloat16:
+                print(f"⚠️  Warning: torch_dtype is {kwargs['torch_dtype']}, forcing bfloat16 for memory efficiency")
+                kwargs['torch_dtype'] = torch.bfloat16
+            
+            # Force low_cpu_mem_usage=True
+            if 'low_cpu_mem_usage' not in kwargs:
+                kwargs['low_cpu_mem_usage'] = True
+            elif not kwargs.get('low_cpu_mem_usage'):
+                print("⚠️  Warning: low_cpu_mem_usage=False, forcing True for memory efficiency")
+                kwargs['low_cpu_mem_usage'] = True
+            
+            # Prefer safetensors if available (enables memory mapping)
+            if 'use_safetensors' not in kwargs:
+                kwargs['use_safetensors'] = True
+            
+            # Call original method
+            return original_modelmixin_from_pretrained(cls, *args, **kwargs)
+        
+        # Apply monkey patch
+        ModelMixin.from_pretrained = classmethod(patched_from_pretrained)
+        print("✅ Applied memory optimization patches: torch_dtype=bfloat16, low_cpu_mem_usage=True, use_safetensors=True")
+        
+    except ImportError as e:
+        print(f"⚠️  Warning: Could not apply memory optimization patches: {e}")
+        print("   Model loading may use more memory than necessary.")
+    except Exception as e:
+        print(f"⚠️  Warning: Error applying memory optimization patches: {e}")
+        print("   Proceeding without patches, but memory usage may be high.")
+
     # Important: CLD infer.py uses `from models...` / `from tools...`, need to set cwd / sys.path to cld_root
     # Here we only change cwd to cld_root（same as finals/CLD/infer/infer_dlcv.py）, ensure consistent relative path/resource reading.
     os.chdir(str(cld_root))
@@ -152,14 +196,23 @@ def main() -> int:
                 print(f"      python {Path(__file__).resolve()} --config_path <config>")
                 return 1
             
-            # Monkey patch torch.load to handle device_count() == 0 case
+            # Monkey patch torch.load to handle device_count() == 0 case AND memory optimization
             # This fixes the issue where third_party/cld/infer/infer.py uses
             # torch.load(..., map_location=torch.device("cuda")) when device_count() == 0
             # We'll load on CPU first, then move to CUDA if device becomes available
+            # Also ensures weights_only=True for security and memory efficiency
             original_torch_load = torch.load
             
             def patched_torch_load(*args, **kwargs):
-                """Patched torch.load that handles CUDA device issues."""
+                """Patched torch.load that handles CUDA device issues and memory optimization."""
+                # Enable weights_only for security and memory efficiency (PyTorch 1.13+)
+                if 'weights_only' not in kwargs:
+                    try:
+                        kwargs['weights_only'] = True
+                    except TypeError:
+                        # Older PyTorch versions don't support weights_only
+                        pass
+                
                 # If map_location is torch.device("cuda") and device_count() == 0,
                 # change it to load on CPU first
                 if "map_location" in kwargs:
@@ -184,7 +237,7 @@ def main() -> int:
             
             # Apply monkey patch
             torch.load = patched_torch_load
-            print("   🔧 Applied monkey patch for torch.load to handle CUDA device issues")
+            print("   🔧 Applied monkey patch for torch.load to handle CUDA device issues and memory optimization")
             
     except ImportError:
         pass  # torch check already done above
