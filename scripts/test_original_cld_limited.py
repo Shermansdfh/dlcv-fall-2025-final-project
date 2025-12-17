@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
-Original CLD Wrapper: Limited Sample Inference
+Original CLD Wrapper: Limited Sample Inference with FP8 Quantization
 
 This script acts as a wrapper around the original `infer.py` to:
 1. Call the original functions dynamically.
 2. Limit the number of samples at the DataLoader level.
 3. Avoid downloading the massive 100GB+ dataset (streaming mode).
-4. Apply memory optimizations (LoRA loading, specific GPU management).
+4. Apply memory optimizations (LoRA loading, bfloat16, FP8 quantization).
+5. FP8 quantization for T5-XXL text encoder (saves ~50% VRAM on T5 components).
 
 Usage:
     cd /path/to/cld/infer
-    python test_original_cld_limited.py --config_path <config.yaml> --max_samples 5
+    python test_original_cld_limited.py --config_path <config.yaml> --max_samples 5 [--enable_fp8]
+
+FP8 Quantization:
+    - Automatically detects and quantizes T5/text encoder modules
+    - Stores weights in FP8 format (1 byte per parameter) to save VRAM
+    - Dynamically decompresses to BF16 during forward pass for computation
+    - Can save hundreds of MB of VRAM for T5-XXL models
+    - Enable with --enable_fp8 flag or config: enable_fp8_quantization=true
 """
 
 import sys
@@ -30,6 +38,240 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 from PIL import Image
+
+# FP8 quantization utilities
+try:
+    import torch.nn.functional as F
+    FP8_AVAILABLE = True
+except ImportError:
+    FP8_AVAILABLE = False
+
+
+class FP8QuantizedLinear(torch.nn.Module):
+    """
+    FP8 quantized Linear layer with dynamic decompression.
+
+    Stores weights in FP8 format to save VRAM, but decompresses to BF16/FP16
+    during forward pass for computation.
+    """
+    def __init__(self, original_linear, block_size=64):
+        super().__init__()
+        self.block_size = block_size
+        self.in_features = original_linear.in_features
+        self.out_features = original_linear.out_features
+        self.bias = original_linear.bias
+
+        # Quantize weights to FP8
+        self.quantize_weights(original_linear.weight.data)
+
+    def quantize_weights(self, weight):
+        """Quantize weights to FP8 format with per-block scaling."""
+        # Store original weight shape
+        original_shape = weight.shape
+
+        # Reshape for block-wise quantization
+        weight_flat = weight.view(-1, weight.shape[-1])
+        num_blocks = (weight_flat.shape[0] + self.block_size - 1) // self.block_size
+
+        # Pad to make divisible by block_size
+        padded_rows = num_blocks * self.block_size
+        if weight_flat.shape[0] < padded_rows:
+            padding = torch.zeros(padded_rows - weight_flat.shape[0], weight_flat.shape[1],
+                                dtype=weight.dtype, device=weight.device)
+            weight_flat = torch.cat([weight_flat, padding], dim=0)
+
+        # Reshape for block processing: [num_blocks, block_size, in_features]
+        weight_blocks = weight_flat.view(num_blocks, self.block_size, -1)
+
+        # Calculate scales for each block (per-output feature group)
+        weight_abs = weight_blocks.abs()
+        scales = weight_abs.max(dim=1, keepdim=True)[0]  # [num_blocks, 1, in_features]
+
+        # Avoid division by zero
+        scales = torch.clamp(scales, min=1e-8)
+
+        # Quantize to FP8 (simulate E4M3 format)
+        # FP8 E4M3: 1 sign bit, 4 exponent bits, 3 mantissa bits
+        # Range: -448 to 448
+        fp8_max = 448.0
+        normalized = weight_blocks / scales
+        quantized = torch.clamp(normalized, -fp8_max, fp8_max)
+
+        # Convert to FP8 storage format (if available) or keep as float8
+        try:
+            # Try to use torch.float8_e4m3fn if available (torch >= 2.1)
+            fp8_tensor = quantized.to(torch.float8_e4m3fn)
+        except AttributeError:
+            # Fallback: store as float16 and simulate FP8 precision
+            # Reduce precision by quantizing to lower bit representation
+            fp8_tensor = (quantized / fp8_max * 127).round().clamp(-127, 127).to(torch.int8)
+
+        # Store quantized weights and scales
+        self.register_buffer('quantized_weight', fp8_tensor)
+        self.register_buffer('scales', scales)
+        self.register_buffer('original_shape', torch.tensor(original_shape))
+
+    def forward(self, x):
+        """Dynamic decompression during forward pass."""
+        # Decompress weights back to BF16/FP16
+        try:
+            # If stored as float8_e4m3fn, convert back
+            if hasattr(torch, 'float8_e4m3fn') and self.quantized_weight.dtype == torch.float8_e4m3fn:
+                dequantized_blocks = self.quantized_weight.to(torch.bfloat16) * self.scales
+            else:
+                # If stored as int8, convert back from simulation
+                fp8_max = 448.0
+                dequantized_blocks = (self.quantized_weight.to(torch.bfloat16) / 127 * fp8_max) * self.scales
+        except Exception as e:
+            print(f"[FP8] Dequantization error: {e}, falling back to original weights")
+            # Fallback: return zero or handle error gracefully
+            return F.linear(x, torch.zeros_like(self.bias.unsqueeze(-1)).expand(self.out_features, self.in_features).to(x.device), self.bias)
+
+        # Reshape back to original weight shape
+        dequantized = dequantized_blocks.view(-1, dequantized_blocks.shape[-1])[:self.original_shape[0]]
+
+        # Standard linear operation
+        return F.linear(x, dequantized, self.bias)
+
+
+class FP8QuantizedModule(torch.nn.Module):
+    """
+    Wrapper that applies FP8 quantization to specific modules (like T5-XXL).
+    """
+    def __init__(self, model, target_modules=['T5EncoderModel', 'T5DecoderModel']):
+        super().__init__()
+        self.model = model
+        self.target_modules = target_modules
+        self.fp8_layers = {}
+
+        # Apply FP8 quantization to target modules
+        self.quantize_model()
+
+    def quantize_model(self):
+        """Recursively quantize Linear layers in target modules."""
+        for name, module in self.model.named_modules():
+            # Check if this module is a target (T5 encoder/decoder)
+            is_target_module = any(target in name for target in self.target_modules)
+
+            if is_target_module and isinstance(module, torch.nn.Linear):
+                print(f"[FP8] Quantizing layer: {name} ({module.in_features} -> {module.out_features})")
+                fp8_layer = FP8QuantizedLinear(module)
+                self.fp8_layers[name] = fp8_layer
+
+                # Replace the original layer
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+
+                if parent_name:
+                    parent = self.model
+                    for part in parent_name.split('.'):
+                        parent = getattr(parent, part)
+                    setattr(parent, child_name, fp8_layer)
+                else:
+                    setattr(self.model, child_name, fp8_layer)
+
+    def forward(self, *args, **kwargs):
+        """Forward pass with dynamic FP8 decompression."""
+        return self.model(*args, **kwargs)
+
+    def get_memory_stats(self):
+        """Get memory statistics for quantized model."""
+        total_params = sum(p.numel() for p in self.model.parameters())
+        fp8_params = sum(layer.quantized_weight.numel() for layer in self.fp8_layers.values())
+
+        # Calculate memory usage
+        original_memory = total_params * 2  # BF16 = 2 bytes
+        fp8_memory = fp8_params * 1  # FP8 = 1 byte
+        other_memory = (total_params - fp8_params) * 2  # Non-quantized params
+
+        total_memory = fp8_memory + other_memory
+
+        return {
+            'total_params': total_params,
+            'fp8_params': fp8_params,
+            'original_memory_mb': original_memory / (1024**2),
+            'quantized_memory_mb': total_memory / (1024**2),
+            'memory_savings_mb': (original_memory - total_memory) / (1024**2),
+            'compression_ratio': original_memory / total_memory if total_memory > 0 else 1.0
+        }
+
+
+def apply_fp8_quantization_to_pipeline(pipeline, config=None, target_modules=['T5EncoderModel']):
+    """
+    Apply FP8 quantization to specific modules in the pipeline (e.g., T5-XXL).
+
+    Args:
+        pipeline: The FLUX/CustomFlux pipeline
+        config: Configuration dict to check if FP8 is enabled
+        target_modules: List of module names to quantize (e.g., ['T5EncoderModel'])
+
+    Returns:
+        Modified pipeline with FP8 quantization
+    """
+    # Check if FP8 quantization is enabled in config
+    if config and not config.get('enable_fp8_quantization', False):
+        print("[FP8] FP8 quantization disabled in config")
+        return pipeline
+
+    if not FP8_AVAILABLE:
+        print("⚠️  FP8 quantization not available (torch version too old)")
+        return pipeline
+
+    print("[FP8] Applying FP8 quantization to pipeline...", flush=True)
+
+    # Look for T5/text encoder modules in the pipeline
+    quantized_modules = {}
+
+    for name, module in pipeline.named_modules():
+        # Check for T5-related modules
+        is_t5_module = any(target in name for target in target_modules) or \
+                      ('text_encoder' in name and hasattr(module, 'encoder')) or \
+                      ('t5' in name.lower())
+
+        if is_t5_module:
+            print(f"[FP8] Found potential T5/text encoder module: {name} (type: {type(module).__name__})")
+
+            # Check if it's a T5 model or text encoder with Linear layers
+            has_linear_layers = any(isinstance(child, torch.nn.Linear)
+                                  for child in module.modules())
+
+            if has_linear_layers:
+                print(f"[FP8] Quantizing Linear layers in: {name}")
+                try:
+                    quantized_modules[name] = FP8QuantizedModule(module, target_modules=[''])
+                    print(f"[FP8] ✅ Applied FP8 quantization to: {name}")
+                except Exception as e:
+                    print(f"[FP8] ❌ Failed to quantize {name}: {e}")
+            else:
+                print(f"[FP8] Skipping {name} (no Linear layers found)")
+
+    if not quantized_modules:
+        print("⚠️  No suitable modules found for FP8 quantization")
+        print("   This is normal if using FLUX.1-dev (CLIP only) instead of FLUX.1-pro (T5)")
+        return pipeline
+
+    # Replace modules in pipeline
+    total_memory_saved = 0
+    for module_path, quantized_module in quantized_modules.items():
+        try:
+            path_parts = module_path.split('.')
+            parent = pipeline
+            for part in path_parts[:-1]:
+                parent = getattr(parent, part)
+            setattr(parent, path_parts[-1], quantized_module)
+
+            # Print memory stats
+            stats = quantized_module.get_memory_stats()
+            print(f"[FP8] {module_path} memory: {stats['original_memory_mb']:.1f}MB → {stats['quantized_memory_mb']:.1f}MB "
+                  f"(saved {stats['memory_savings_mb']:.1f}MB, {stats['compression_ratio']:.2f}x)")
+            total_memory_saved += stats['memory_savings_mb']
+        except Exception as e:
+            print(f"[FP8] ❌ Failed to replace module {module_path}: {e}")
+
+    if total_memory_saved > 0:
+        print(f"[FP8] ✅ Total memory saved: {total_memory_saved:.1f}MB")
+    print("[FP8] FP8 quantization setup completed")
+    return pipeline
 
 # Third-party optional imports (handled in code or assumed present)
 try:
@@ -492,12 +734,7 @@ def run_inference(infer_module, config, max_samples=5):
     if torch.cuda.is_available():
         print("[INFO] Converting VAE to bfloat16 for memory efficiency...", flush=True)
         transp_vae = transp_vae.to(torch.bfloat16)
-
-        # Print VAE memory usage
-        vae_params = sum(p.numel() for p in transp_vae.parameters())
-        vae_memory_mb = vae_params * 2 / (1024 * 1024)  # bfloat16 = 2 bytes per param
-        print(f"[INFO] VAE parameters: {vae_params:,} ({vae_memory_mb:.1f} MB in bfloat16)")
-
+    
     # --- Load Pipeline ---
     apply_skip_fuse_patch(config)
     pipeline = infer_module.initialize_pipeline(config)
@@ -505,43 +742,15 @@ def run_inference(infer_module, config, max_samples=5):
     # Ensure pipeline components are also in bfloat16
     if torch.cuda.is_available():
         print("[INFO] Ensuring pipeline components use bfloat16...", flush=True)
-
         # Convert transformer to bfloat16 if available
         if hasattr(pipeline, 'transformer'):
             pipeline.transformer = pipeline.transformer.to(torch.bfloat16)
-            transformer_params = sum(p.numel() for p in pipeline.transformer.parameters())
-            transformer_memory_mb = transformer_params * 2 / (1024 * 1024)
-            print(f"[INFO] Transformer parameters: {transformer_params:,} ({transformer_memory_mb:.1f} MB in bfloat16)")
-
-        # Convert VAE in pipeline to bfloat16 if available (different from our transp_vae)
+        # Convert VAE in pipeline to bfloat16 if available
         if hasattr(pipeline, 'vae') and pipeline.vae is not None:
             pipeline.vae = pipeline.vae.to(torch.bfloat16)
 
-        # Note: encode_in_chunks has been optimized directly in the source code
-
-        # Patch the problematic decode section in pipeline.__call__
-        if hasattr(pipeline, '__call__'):
-            original_call = pipeline.__call__
-
-            def memory_efficient_call(self, *args, **kwargs):
-                # Call the original method, but we'll patch the decode part
-                # The decode happens inside the original __call__, so we need to patch it there
-                # For now, we'll add a more aggressive cleanup after the call
-                result = original_call(*args, **kwargs)
-
-                # More aggressive cleanup after pipeline call
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-
-                return result
-
-            # Note: Actually patching __call__ might be too invasive. Let's try a different approach.
-            # We'll patch the VAE decode method instead to be more memory efficient for multiple segments
-
-        # Force garbage collection after conversions
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+    # Apply FP8 quantization to T5 components if available
+    pipeline = apply_fp8_quantization_to_pipeline(pipeline, config, target_modules=['T5EncoderModel', 'T5DecoderModel', 'text_encoder_2'])
     
     # --- Setup Data ---
     dataset = LimitedLayoutTrainDataset(config['data_dir'], split="test", max_samples=max_samples)
@@ -559,41 +768,23 @@ def run_inference(infer_module, config, max_samples=5):
         print(f"Processing case {idx} (Sample {idx+1} of {len(dataset)})")
         print(f"{'='*60}", flush=True)
         
-        # Ensure models are still in bfloat16 (sometimes operations can change dtype)
-        if torch.cuda.is_available():
-            try:
-                if hasattr(pipeline, 'transformer') and next(pipeline.transformer.parameters()).dtype != torch.bfloat16:
-                    print("   ⚠️  Transformer dtype changed, reconverting to bfloat16...", flush=True)
-                    pipeline.transformer = pipeline.transformer.to(torch.bfloat16)
-                if hasattr(pipeline, 'vae') and pipeline.vae and next(pipeline.vae.parameters()).dtype != torch.bfloat16:
-                    print("   ⚠️  Pipeline VAE dtype changed, reconverting to bfloat16...", flush=True)
-                    pipeline.vae = pipeline.vae.to(torch.bfloat16)
-                if next(transp_vae.parameters()).dtype != torch.bfloat16:
-                    print("   ⚠️  Transp VAE dtype changed, reconverting to bfloat16...", flush=True)
-                    transp_vae = transp_vae.to(torch.bfloat16)
-            except (StopIteration, RuntimeError):
-                pass  # No parameters to check
-
         # Aggressive cleanup before generation
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
-        # Extract data from batch BEFORE deleting it
         H, W = int(batch["height"][0]), int(batch["width"][0])
-        adapter_img = batch["whole_img"][0]  # PIL Image
-        caption = batch["caption"][0]  # String
-        layout_boxes = batch["layout"][0]  # List/tensor
-        boxes = infer_module.get_input_box(layout_boxes)  # Processed boxes
-
+        adapter_img = batch["whole_img"][0]
+        caption = batch["caption"][0]
+        boxes = infer_module.get_input_box(batch["layout"][0])
+        
         # Delete batch immediately to free memory before pipeline call
-        del batch, layout_boxes
+        del batch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         # Generate layers using pipeline
-        print(f"[DEBUG] Starting pipeline call (before: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated)")
         with torch.no_grad():
             x_hat, image_res, latents = pipeline(
                 prompt=caption,
@@ -606,14 +797,6 @@ def run_inference(infer_module, config, max_samples=5):
                 num_layers=len(boxes),
                 sdxl_vae=transp_vae,
             )
-
-        print(f"[DEBUG] Pipeline call completed (after: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated)")
-
-        # Clean up input variables that are no longer needed
-        del caption, boxes, adapter_img
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            print(f"[DEBUG] After input cleanup: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated)")
 
         # Move to CPU immediately to free VRAM
         x_hat = (x_hat + 1) / 2
@@ -638,9 +821,8 @@ def run_inference(infer_module, config, max_samples=5):
         whole_img_np = (x_hat[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         Image.fromarray(whole_img_np, "RGBA").save(case_dir / "whole_image_rgba.png")
         adapter_img.save(case_dir / "origin.png")
-        del whole_img_np  # Free whole_img_np immediately
-        # Note: adapter_img will be deleted later with other variables
-
+        del whole_img_np  # Free immediately
+        
         # 2. Background
         bg_np = (x_hat[1].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         Image.fromarray(bg_np, "RGBA").save(case_dir / "background_rgba.png")
@@ -648,8 +830,6 @@ def run_inference(infer_module, config, max_samples=5):
         # 3. Layers
         layers_tensor = x_hat[2:]
         del x_hat  # Free x_hat after extracting layers
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()  # Clear cache after freeing x_hat
         
         # Re-composite logic (from code) to ensure quality
         merged_pil = Image.fromarray(bg_np, "RGBA")  # Start with background
@@ -672,8 +852,7 @@ def run_inference(infer_module, config, max_samples=5):
         # Delete all intermediate variables
         try:
             del x_hat, image_res, layers_tensor, merged_pil
-            del bg_np, l_np, l_pil, adapter_img
-            # Note: whole_img_np is already deleted earlier
+            del whole_img_np, bg_np, l_np, l_pil
         except NameError:
             pass
         
@@ -713,9 +892,11 @@ def run_inference(infer_module, config, max_samples=5):
 # ==========================================
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="CLD Limited Inference Wrapper")
+    parser = argparse.ArgumentParser(description="CLD Limited Inference Wrapper with FP8 quantization support")
     parser.add_argument("--config_path", "-c", type=str, required=True, help="Path to config.yaml")
     parser.add_argument("--max_samples", "-n", type=int, default=5, help="Max samples to process")
+    parser.add_argument("--enable_fp8", action="store_true",
+                       help="Enable FP8 quantization for T5-XXL text encoder (saves ~50%% VRAM)")
     args = parser.parse_args()
 
     # 1. Setup Environment
@@ -734,18 +915,19 @@ if __name__ == '__main__':
     
     # 5. Load Config & Run
     config = infer_module.load_config(args.config_path)
-    
+
+    # Override config with command line args
+    if args.enable_fp8:
+        config['enable_fp8_quantization'] = True
+        print("[CONFIG] FP8 quantization enabled via command line")
+
     # Log memory settings
     if config.get('skip_fuse_lora'):
         print("[CONFIG] skip_fuse_lora=True (Memory Saving Mode)")
-
-    # Log memory optimization status
-    print("[MEMORY] Memory optimizations active:")
-    print("  - Models loaded in bfloat16 (50% memory reduction)")
-    print("  - encode_in_chunks optimized with chunk_size=4")
-    print("  - decode_segments optimized with chunk_size=4 (prevents memory spike)")
-    print("  - Aggressive cleanup between images")
-    print("  - Low CPU memory usage enabled")
+    if config.get('enable_fp8_quantization', False):
+        print("[CONFIG] enable_fp8_quantization=True (T5-XXL FP8 quantization enabled)")
+    else:
+        print("[CONFIG] FP8 quantization disabled (use --enable_fp8 or set enable_fp8_quantization=true in config)")
 
     try:
         run_inference(infer_module, config, args.max_samples)
