@@ -57,7 +57,94 @@ else:
 # Memory optimization: Monkey patch from_pretrained BEFORE loading infer_module
 # This ensures that when infer.py calls from_pretrained, it will use our optimized version
 # This prevents memory doubling (24GB -> 48GB) and enables safetensors memory mapping
-print("[INFO] 應用記憶體優化 patch：bfloat16 + low_cpu_mem_usage + safetensors...", flush=True)
+print("[INFO] 應用記憶體優化 patch：bfloat16 + low_cpu_mem_usage + safetensors + NF4量化T5...", flush=True)
+
+# ===== 第一步：Patch transformers.PreTrainedModel（針對 T5 Text Encoder）=====
+# T5EncoderModel 繼承自 transformers.PreTrainedModel，不是 diffusers.ModelMixin
+# 所以必須先 patch transformers 的基類
+print("[INFO] Patching transformers.PreTrainedModel.from_pretrained for T5 NF4 quantization...", flush=True)
+try:
+    import transformers
+    from transformers import PreTrainedModel
+    
+    # 備份原始方法
+    original_pretrainedmodel_from_pretrained_func = PreTrainedModel.from_pretrained.__func__
+    
+    @classmethod
+    def patched_pretrainedmodel_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        """Patched PreTrainedModel.from_pretrained that applies NF4 quantization to T5."""
+        import time
+        start_time = time.time()
+        
+        # 檢測是否為 T5EncoderModel
+        is_t5_encoder = False
+        class_name = cls.__name__ if hasattr(cls, '__name__') else str(cls)
+        class_module = cls.__module__ if hasattr(cls, '__module__') else ''
+        
+        # 精確匹配 T5EncoderModel
+        if class_name == 'T5EncoderModel' or 'T5EncoderModel' in class_name:
+            is_t5_encoder = True
+            print(f"[INFO] ✅ 攔截到 T5EncoderModel ({class_name})，將使用 NF4 量化", flush=True)
+        elif 't5' in class_module.lower() and 'encoder' in class_module.lower():
+            # 進一步確認：檢查模組路徑格式 transformers.models.t5.modeling_t5.T5EncoderModel
+            is_t5_encoder = True
+            print(f"[INFO] ✅ 攔截到 T5EncoderModel (模組: {class_module}.{class_name})，將使用 NF4 量化", flush=True)
+        
+        # 對於 T5EncoderModel，使用 bitsandbytes NF4 量化
+        if is_t5_encoder:
+            try:
+                from transformers import BitsAndBytesConfig
+                
+                # 檢查是否已經有 quantization_config（用戶可能已經指定）
+                if 'quantization_config' not in kwargs:
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,  # 使用雙重量化以進一步節省記憶體
+                    )
+                    kwargs['quantization_config'] = quantization_config
+                    print(f"  ✅ 已設置 T5EncoderModel NF4 量化配置（4-bit + double quantization）", flush=True)
+                    print(f"  💾 T5 記憶體：~10GB → ~4.8GB（節省 ~50%）", flush=True)
+                else:
+                    print(f"  ℹ️  已提供 quantization_config，跳過自動設置", flush=True)
+                
+                # T5 量化加載通常需要 device_map，但在 diffusers pipeline 中可能會自動處理
+                # 這裡不強制設置 device_map，讓 transformers 自動處理
+            except ImportError:
+                print(f"  ⚠️  Warning: bitsandbytes 未安裝，無法使用 NF4 量化", flush=True)
+                print(f"     安裝方式: pip install bitsandbytes", flush=True)
+                print(f"     T5 將使用 bfloat16 加載（記憶體使用較高）", flush=True)
+                is_t5_encoder = False  # 回退到普通加載
+        
+        # 對於非量化的 transformers 模型，設置 bfloat16
+        if not is_t5_encoder:
+            if 'torch_dtype' not in kwargs:
+                kwargs['torch_dtype'] = torch.bfloat16
+        
+        # Call original method
+        model = original_pretrainedmodel_from_pretrained_func(cls, pretrained_model_name_or_path, *args, **kwargs)
+        
+        elapsed = time.time() - start_time
+        if is_t5_encoder:
+            print(f"[DEBUG] T5EncoderModel.from_pretrained (NF4量化): Completed in {elapsed:.2f}s", flush=True)
+        else:
+            print(f"[DEBUG] PreTrainedModel.from_pretrained ({class_name}): Completed in {elapsed:.2f}s", flush=True)
+        
+        return model
+    
+    # 應用 Patch 到 transformers 的基類
+    PreTrainedModel.from_pretrained = patched_pretrainedmodel_from_pretrained
+    print("✅ 已應用 transformers.PreTrainedModel.from_pretrained patch（T5 NF4量化）", flush=True)
+    
+except ImportError as e:
+    print(f"⚠️  Warning: Could not apply transformers patch: {e}", flush=True)
+    print("   T5 will be loaded without NF4 quantization (higher memory usage)", flush=True)
+except Exception as e:
+    print(f"⚠️  Warning: Error applying transformers patch: {e}", flush=True)
+    print("   T5 will be loaded without NF4 quantization (higher memory usage)", flush=True)
+
+# ===== 第二步：Patch diffusers.ModelMixin（針對 diffusers 模型）=====
 try:
     from diffusers import ModelMixin
     
@@ -66,7 +153,13 @@ try:
     original_modelmixin_from_pretrained_func = ModelMixin.from_pretrained.__func__
     
     def patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        """Patched from_pretrained that enforces memory optimizations."""
+        """Patched from_pretrained that enforces memory optimizations and GPU loading."""
+        import time
+        start_time = time.time()
+        
+        # 注意：T5EncoderModel 不會走這裡，因為它繼承自 transformers.PreTrainedModel
+        # 這裡只處理 diffusers 的模型（如 FluxTransformer2DModel, AutoencoderKL 等）
+        
         # Force torch_dtype=bfloat16 if not specified
         if 'torch_dtype' not in kwargs:
             kwargs['torch_dtype'] = torch.bfloat16
@@ -86,7 +179,52 @@ try:
             kwargs['use_safetensors'] = True
         
         # Call original method with correct signature
-        return original_modelmixin_from_pretrained_func(cls, pretrained_model_name_or_path, *args, **kwargs)
+        model = original_modelmixin_from_pretrained_func(cls, pretrained_model_name_or_path, *args, **kwargs)
+        
+        # 確保模型加載後立即移到 GPU（如果 CUDA 可用）
+        # 注意：使用 bitsandbytes 量化的模型會自動在 GPU 上，不需要手動移動
+        if torch.cuda.is_available() and model is not None:
+            try:
+                # 檢查模型是否已經在 GPU 上
+                device = None
+                if hasattr(model, 'parameters'):
+                    try:
+                        device = next(model.parameters()).device
+                    except StopIteration:
+                        # 模型沒有參數，嘗試檢查 buffers
+                        if hasattr(model, 'named_buffers'):
+                            try:
+                                device = next(model.named_buffers())[1].device
+                            except StopIteration:
+                                pass
+                
+                if device is not None and device.type != 'cuda':
+                    print(f"[DEBUG] Moving {cls.__name__} to GPU after loading...", flush=True)
+                    move_start = time.time()
+                    model = model.to('cuda')
+                    # 確保所有參數都在 GPU 上
+                    if hasattr(model, 'named_parameters'):
+                        for name, param in model.named_parameters():
+                            if param.device.type != 'cuda':
+                                param.data = param.data.to('cuda')
+                    # 確保所有 buffers 都在 GPU 上
+                    if hasattr(model, 'named_buffers'):
+                        for name, buffer in model.named_buffers():
+                            if buffer.device.type != 'cuda':
+                                buffer.data = buffer.data.to('cuda')
+                    torch.cuda.synchronize()
+                    move_elapsed = time.time() - move_start
+                    print(f"  ✅ Moved {cls.__name__} to GPU in {move_elapsed:.2f}s", flush=True)
+                elif device is not None:
+                    print(f"  ✅ {cls.__name__} already on GPU: {device}", flush=True)
+            except Exception as e:
+                print(f"  ⚠️  Warning: Could not move {cls.__name__} to GPU: {e}", flush=True)
+                print(f"   Model will remain on current device", flush=True)
+        
+        elapsed = time.time() - start_time
+        print(f"[DEBUG] from_pretrained ({cls.__name__}): Completed in {elapsed:.2f}s", flush=True)
+        
+        return model
     
     # Apply monkey patch as classmethod
     ModelMixin.from_pretrained = classmethod(patched_from_pretrained)
@@ -398,6 +536,56 @@ try:
         print("  ✅ Optimized MultiLayerAdapter.fuse_lora", flush=True)
     
     print("✅ GPU-optimized fuse_lora patches applied", flush=True)
+    
+    # Also patch CustomFluxTransformer2DModel.from_pretrained to ensure GPU loading
+    if hasattr(CustomFluxTransformer2DModel, 'from_pretrained'):
+        original_transformer_from_pretrained = CustomFluxTransformer2DModel.from_pretrained
+        
+        @classmethod
+        def optimized_transformer_from_pretrained(cls, *args, **kwargs):
+            """
+            Optimized from_pretrained for CustomFluxTransformer2DModel that ensures GPU loading
+            """
+            import time
+            print("[DEBUG] CustomFluxTransformer2DModel.from_pretrained: Starting GPU-optimized loading...", flush=True)
+            
+            # Call original from_pretrained (which will use our patched ModelMixin.from_pretrained)
+            start_time = time.time()
+            model = original_transformer_from_pretrained(*args, **kwargs)
+            
+            # 確保模型在 GPU 上（ModelMixin.from_pretrained 應該已經處理了，但為了安全起見再檢查一次）
+            if torch.cuda.is_available():
+                device = next(model.parameters()).device
+                if device.type != 'cuda':
+                    print(f"  ⚠️  Warning: CustomFluxTransformer2DModel is on {device}, moving to GPU...", flush=True)
+                    model = model.to('cuda')
+                    # 確保所有參數都在 GPU 上
+                    for name, param in model.named_parameters():
+                        if param.device.type != 'cuda':
+                            param.data = param.data.to('cuda')
+                    # 確保所有 buffers 都在 GPU 上（包括 layer_pe）
+                    for name, buffer in model.named_buffers():
+                        if buffer.device.type != 'cuda':
+                            buffer.data = buffer.data.to('cuda')
+                    torch.cuda.synchronize()
+                    print(f"  ✅ Moved CustomFluxTransformer2DModel to GPU", flush=True)
+                else:
+                    print(f"  ✅ CustomFluxTransformer2DModel already on GPU: {device}", flush=True)
+                
+                # 確保 layer_pe 也在 GPU 上（CustomFluxTransformer2DModel 的特殊處理）
+                if hasattr(model, 'layer_pe'):
+                    if model.layer_pe.device.type != 'cuda':
+                        model.layer_pe = model.layer_pe.to('cuda')
+                        print(f"  ✅ Moved layer_pe to GPU", flush=True)
+            
+            elapsed = time.time() - start_time
+            print(f"[DEBUG] CustomFluxTransformer2DModel.from_pretrained: Completed in {elapsed:.2f}s", flush=True)
+            
+            return model
+        
+        CustomFluxTransformer2DModel.from_pretrained = optimized_transformer_from_pretrained
+        print("  ✅ Optimized CustomFluxTransformer2DModel.from_pretrained for GPU loading", flush=True)
+    
 except ImportError as e:
     print(f"⚠️  Warning: Could not optimize fuse_lora: {e}", flush=True)
 except Exception as e:
