@@ -1031,24 +1031,32 @@ def inference_layout_limited(config, max_samples: int = 5):
         print(f"[DEBUG] Pipeline type: {type(pipeline).__name__}", flush=True)
         print(f"[DEBUG] Pipeline class: {type(pipeline)}", flush=True)
         
-        # 檢查 pipeline 是否支持 adapter_image 參數
+        # 檢查 pipeline 是否支持 adapter_image 參數（使用多種方法確保準確性）
         supports_adapter_image = False
-        if hasattr(pipeline, '__call__'):
+        
+        # 方法1: 根據類型判斷（最可靠）
+        try:
+            from models.pipeline import CustomFluxPipelineCfgLayer
+            if isinstance(pipeline, CustomFluxPipelineCfgLayer):
+                supports_adapter_image = True
+                print(f"[DEBUG] ✅ Pipeline is CustomFluxPipelineCfgLayer, supports 'adapter_image'", flush=True)
+        except ImportError:
+            pass
+        
+        # 方法2: 使用 inspect.signature 檢查
+        if not supports_adapter_image and hasattr(pipeline, '__call__'):
             import inspect
             try:
                 sig = inspect.signature(pipeline.__call__)
                 print(f"[DEBUG] Pipeline.__call__ signature: {sig}", flush=True)
                 supports_adapter_image = 'adapter_image' in sig.parameters
                 if supports_adapter_image:
-                    print(f"[DEBUG] ✅ Pipeline supports 'adapter_image' parameter", flush=True)
+                    print(f"[DEBUG] ✅ Pipeline supports 'adapter_image' parameter (via signature)", flush=True)
                 else:
                     print(f"[DEBUG] ⚠️  Pipeline does NOT support 'adapter_image' parameter", flush=True)
                     print(f"[DEBUG] Available parameters: {list(sig.parameters.keys())}", flush=True)
             except Exception as e:
                 print(f"[DEBUG] Could not inspect signature: {e}", flush=True)
-                # 如果無法檢查，嘗試根據類型判斷
-                from models.pipeline import CustomFluxPipelineCfgLayer
-                supports_adapter_image = isinstance(pipeline, CustomFluxPipelineCfgLayer)
         
         # 根據 pipeline 支持的參數構建調用參數
         pipeline_kwargs = {
@@ -1070,8 +1078,22 @@ def inference_layout_limited(config, max_samples: int = 5):
         else:
             print(f"[DEBUG] Skipping adapter_image (not supported by this pipeline type)", flush=True)
         
+        # 使用 try-except 處理可能的參數錯誤
         with torch.no_grad():
-            x_hat, image, latents = pipeline(**pipeline_kwargs)
+            try:
+                x_hat, image, latents = pipeline(**pipeline_kwargs)
+            except TypeError as e:
+                error_msg = str(e)
+                if 'unexpected keyword argument' in error_msg and 'adapter_image' in error_msg:
+                    print(f"[ERROR] Pipeline does not accept 'adapter_image' parameter, retrying without it...", flush=True)
+                    # 移除 adapter_image 相關參數並重試
+                    pipeline_kwargs.pop('adapter_image', None)
+                    pipeline_kwargs.pop('adapter_conditioning_scale', None)
+                    print(f"[DEBUG] Retrying with parameters: {list(pipeline_kwargs.keys())}", flush=True)
+                    x_hat, image, latents = pipeline(**pipeline_kwargs)
+                else:
+                    # 其他 TypeError，直接重新拋出
+                    raise
 
         # Adjust x_hat range from [-1, 1] to [0, 1]
         x_hat = (x_hat + 1) / 2
