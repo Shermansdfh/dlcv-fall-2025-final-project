@@ -362,6 +362,80 @@ try:
         print("✅ Applied LoRA loading optimization: safetensors + direct GPU loading", flush=True)
         print("[DEBUG] Finished LoRA optimization setup", flush=True)
         
+        # Patch CustomFluxPipeline.from_pretrained to handle NF4 quantization compatibility
+        # When T5 uses NF4 quantization, bitsandbytes automatically enables sequential CPU offloading
+        # This conflicts with .to("cuda") calls, so we need to skip them
+        if hasattr(CustomFluxPipeline, 'from_pretrained'):
+            original_pipeline_from_pretrained = CustomFluxPipeline.from_pretrained
+            
+            @classmethod
+            def patched_pipeline_from_pretrained(cls, *args, **kwargs):
+                """Patched CustomFluxPipeline.from_pretrained that handles NF4 quantization compatibility."""
+                import time
+                start_time = time.time()
+                print("[DEBUG] CustomFluxPipeline.from_pretrained: Starting...", flush=True)
+                
+                # Call original from_pretrained
+                pipeline = original_pipeline_from_pretrained(*args, **kwargs)
+                
+                # Check if text_encoder_2 (T5) uses quantization
+                uses_quantization = False
+                if hasattr(pipeline, 'text_encoder_2') and pipeline.text_encoder_2 is not None:
+                    # Check if text_encoder_2 has quantization layers (bitsandbytes)
+                    try:
+                        for name, module in pipeline.text_encoder_2.named_modules():
+                            # bitsandbytes quantized modules have specific attributes
+                            if hasattr(module, 'weight') and hasattr(module.weight, 'quant_state'):
+                                uses_quantization = True
+                                break
+                    except Exception:
+                        pass
+                
+                if uses_quantization:
+                    print("[INFO] ✅ 檢測到 T5 使用 NF4 量化，pipeline 已啟用 sequential CPU offloading", flush=True)
+                    print("[INFO]   將跳過後續的 .to('cuda') 調用以避免衝突", flush=True)
+                    # Set a flag on the pipeline to indicate quantization is used
+                    pipeline._uses_quantization = True
+                else:
+                    pipeline._uses_quantization = False
+                
+                elapsed = time.time() - start_time
+                print(f"[DEBUG] CustomFluxPipeline.from_pretrained: Completed in {elapsed:.2f}s", flush=True)
+                
+                return pipeline
+            
+            CustomFluxPipeline.from_pretrained = patched_pipeline_from_pretrained
+            print("✅ Patched CustomFluxPipeline.from_pretrained for NF4 quantization compatibility", flush=True)
+            
+            # Patch Pipeline.to() method to skip GPU move when quantization is used
+            from diffusers import DiffusionPipeline
+            if hasattr(DiffusionPipeline, 'to'):
+                original_pipeline_to = DiffusionPipeline.to
+                
+                def patched_pipeline_to(self, device=None, *args, **kwargs):
+                    """Patched Pipeline.to() that skips GPU move when quantization is used."""
+                    # Check if this pipeline uses quantization
+                    if hasattr(self, '_uses_quantization') and self._uses_quantization:
+                        # Check if trying to move to CUDA
+                        is_cuda_device = False
+                        if device is not None:
+                            if isinstance(device, str) and 'cuda' in device.lower():
+                                is_cuda_device = True
+                            elif hasattr(device, 'type') and device.type == 'cuda':
+                                is_cuda_device = True
+                            elif isinstance(device, torch.device) and device.type == 'cuda':
+                                is_cuda_device = True
+                        
+                        if is_cuda_device:
+                            print("[INFO] ⚠️  跳過 .to('cuda') 調用（T5 使用 NF4 量化，已啟用 sequential CPU offloading）", flush=True)
+                            return self  # Return self without moving to GPU
+                    
+                    # For non-quantized pipelines, use original behavior
+                    return original_pipeline_to(self, device, *args, **kwargs)
+                
+                DiffusionPipeline.to = patched_pipeline_to
+                print("✅ Patched DiffusionPipeline.to() for NF4 quantization compatibility", flush=True)
+        
         # Also patch load_lora_into_transformer to handle tuple return from optimized_lora_state_dict
         if hasattr(CustomFluxPipeline, 'load_lora_into_transformer'):
             original_load_lora = CustomFluxPipeline.load_lora_into_transformer
