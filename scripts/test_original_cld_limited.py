@@ -153,7 +153,7 @@ try:
     original_modelmixin_from_pretrained_func = ModelMixin.from_pretrained.__func__
     
     def patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
-        """Patched from_pretrained that enforces memory optimizations and GPU loading."""
+        """Patched from_pretrained that enforces memory optimizations."""
         import time
         start_time = time.time()
         
@@ -180,46 +180,6 @@ try:
         
         # Call original method with correct signature
         model = original_modelmixin_from_pretrained_func(cls, pretrained_model_name_or_path, *args, **kwargs)
-        
-        # 確保模型加載後立即移到 GPU（如果 CUDA 可用）
-        # 注意：使用 bitsandbytes 量化的模型會自動在 GPU 上，不需要手動移動
-        if torch.cuda.is_available() and model is not None:
-            try:
-                # 檢查模型是否已經在 GPU 上
-                device = None
-                if hasattr(model, 'parameters'):
-                    try:
-                        device = next(model.parameters()).device
-                    except StopIteration:
-                        # 模型沒有參數，嘗試檢查 buffers
-                        if hasattr(model, 'named_buffers'):
-                            try:
-                                device = next(model.named_buffers())[1].device
-                            except StopIteration:
-                                pass
-                
-                if device is not None and device.type != 'cuda':
-                    print(f"[DEBUG] Moving {cls.__name__} to GPU after loading...", flush=True)
-                    move_start = time.time()
-                    model = model.to('cuda')
-                    # 確保所有參數都在 GPU 上
-                    if hasattr(model, 'named_parameters'):
-                        for name, param in model.named_parameters():
-                            if param.device.type != 'cuda':
-                                param.data = param.data.to('cuda')
-                    # 確保所有 buffers 都在 GPU 上
-                    if hasattr(model, 'named_buffers'):
-                        for name, buffer in model.named_buffers():
-                            if buffer.device.type != 'cuda':
-                                buffer.data = buffer.data.to('cuda')
-                    torch.cuda.synchronize()
-                    move_elapsed = time.time() - move_start
-                    print(f"  ✅ Moved {cls.__name__} to GPU in {move_elapsed:.2f}s", flush=True)
-                elif device is not None:
-                    print(f"  ✅ {cls.__name__} already on GPU: {device}", flush=True)
-            except Exception as e:
-                print(f"  ⚠️  Warning: Could not move {cls.__name__} to GPU: {e}", flush=True)
-                print(f"   Model will remain on current device", flush=True)
         
         elapsed = time.time() - start_time
         print(f"[DEBUG] from_pretrained ({cls.__name__}): Completed in {elapsed:.2f}s", flush=True)
@@ -536,55 +496,6 @@ try:
         print("  ✅ Optimized MultiLayerAdapter.fuse_lora", flush=True)
     
     print("✅ GPU-optimized fuse_lora patches applied", flush=True)
-    
-    # Also patch CustomFluxTransformer2DModel.from_pretrained to ensure GPU loading
-    if hasattr(CustomFluxTransformer2DModel, 'from_pretrained'):
-        original_transformer_from_pretrained = CustomFluxTransformer2DModel.from_pretrained
-        
-        @classmethod
-        def optimized_transformer_from_pretrained(cls, *args, **kwargs):
-            """
-            Optimized from_pretrained for CustomFluxTransformer2DModel that ensures GPU loading
-            """
-            import time
-            print("[DEBUG] CustomFluxTransformer2DModel.from_pretrained: Starting GPU-optimized loading...", flush=True)
-            
-            # Call original from_pretrained (which will use our patched ModelMixin.from_pretrained)
-            start_time = time.time()
-            model = original_transformer_from_pretrained(*args, **kwargs)
-            
-            # 確保模型在 GPU 上（ModelMixin.from_pretrained 應該已經處理了，但為了安全起見再檢查一次）
-            if torch.cuda.is_available():
-                device = next(model.parameters()).device
-                if device.type != 'cuda':
-                    print(f"  ⚠️  Warning: CustomFluxTransformer2DModel is on {device}, moving to GPU...", flush=True)
-                    model = model.to('cuda')
-                    # 確保所有參數都在 GPU 上
-                    for name, param in model.named_parameters():
-                        if param.device.type != 'cuda':
-                            param.data = param.data.to('cuda')
-                    # 確保所有 buffers 都在 GPU 上（包括 layer_pe）
-                    for name, buffer in model.named_buffers():
-                        if buffer.device.type != 'cuda':
-                            buffer.data = buffer.data.to('cuda')
-                    torch.cuda.synchronize()
-                    print(f"  ✅ Moved CustomFluxTransformer2DModel to GPU", flush=True)
-                else:
-                    print(f"  ✅ CustomFluxTransformer2DModel already on GPU: {device}", flush=True)
-                
-                # 確保 layer_pe 也在 GPU 上（CustomFluxTransformer2DModel 的特殊處理）
-                if hasattr(model, 'layer_pe'):
-                    if model.layer_pe.device.type != 'cuda':
-                        model.layer_pe = model.layer_pe.to('cuda')
-                        print(f"  ✅ Moved layer_pe to GPU", flush=True)
-            
-            elapsed = time.time() - start_time
-            print(f"[DEBUG] CustomFluxTransformer2DModel.from_pretrained: Completed in {elapsed:.2f}s", flush=True)
-            
-            return model
-        
-        CustomFluxTransformer2DModel.from_pretrained = optimized_transformer_from_pretrained
-        print("  ✅ Optimized CustomFluxTransformer2DModel.from_pretrained for GPU loading", flush=True)
     
 except ImportError as e:
     print(f"⚠️  Warning: Could not optimize fuse_lora: {e}", flush=True)
