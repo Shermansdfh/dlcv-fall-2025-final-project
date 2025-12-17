@@ -52,6 +52,58 @@ os.chdir(str(cld_root))
 # 1. System & Environment Setup
 # ==========================================
 
+def apply_memory_optimization_patches():
+    """
+    Patches ModelMixin.from_pretrained to force bfloat16/float16 for memory efficiency.
+    This must be called BEFORE loading the infer_module to ensure all model loading uses half precision.
+    """
+    print("[INFO] Applying memory optimization patches (bfloat16)...", flush=True)
+    try:
+        from diffusers import ModelMixin
+        
+        # Store original from_pretrained method
+        original_from_pretrained_func = ModelMixin.from_pretrained.__func__
+        
+        def patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+            """Patched from_pretrained that enforces bfloat16 for memory efficiency."""
+            # Force torch_dtype=bfloat16 if not specified
+            if 'torch_dtype' not in kwargs:
+                kwargs['torch_dtype'] = torch.bfloat16
+            elif kwargs.get('torch_dtype') != torch.bfloat16:
+                # Only warn if explicitly set to something else (not None)
+                if kwargs.get('torch_dtype') is not None:
+                    print(f"   ⚠️  Overriding torch_dtype={kwargs['torch_dtype']} → bfloat16 for memory efficiency", flush=True)
+                kwargs['torch_dtype'] = torch.bfloat16
+            
+            # Force low_cpu_mem_usage=True
+            if 'low_cpu_mem_usage' not in kwargs:
+                kwargs['low_cpu_mem_usage'] = True
+            elif not kwargs.get('low_cpu_mem_usage'):
+                print("   ⚠️  Forcing low_cpu_mem_usage=True for memory efficiency", flush=True)
+                kwargs['low_cpu_mem_usage'] = True
+            
+            # Prefer safetensors if available (enables memory mapping)
+            if 'use_safetensors' not in kwargs:
+                kwargs['use_safetensors'] = True
+            
+            # Call original method
+            return original_from_pretrained_func(cls, pretrained_model_name_or_path, *args, **kwargs)
+        
+        # Apply monkey patch as classmethod
+        ModelMixin.from_pretrained = classmethod(patched_from_pretrained)
+        print("✅ Memory optimization patches applied: torch_dtype=bfloat16, low_cpu_mem_usage=True, use_safetensors=True", flush=True)
+        return True
+        
+    except ImportError as e:
+        print(f"⚠️  Warning: Could not apply memory optimization patches: {e}", flush=True)
+        print("   Model loading may use more memory than necessary.", flush=True)
+        return False
+    except Exception as e:
+        print(f"⚠️  Warning: Error applying memory optimization patches: {e}", flush=True)
+        print("   Proceeding without patches, but memory usage may be high.", flush=True)
+        return False
+
+
 def setup_cuda_environment():
     """Checks CUDA availability and warns user if running on CPU."""
     if torch.cuda.is_available():
@@ -433,9 +485,24 @@ def run_inference(infer_module, config, max_samples=5):
 
     transp_vae.eval().to(device)
     
+    # Convert VAE to bfloat16 for memory efficiency
+    if torch.cuda.is_available():
+        print("[INFO] Converting VAE to bfloat16 for memory efficiency...", flush=True)
+        transp_vae = transp_vae.to(torch.bfloat16)
+    
     # --- Load Pipeline ---
     apply_skip_fuse_patch(config)
     pipeline = infer_module.initialize_pipeline(config)
+    
+    # Ensure pipeline components are also in bfloat16
+    if torch.cuda.is_available():
+        print("[INFO] Ensuring pipeline components use bfloat16...", flush=True)
+        # Convert transformer to bfloat16 if available
+        if hasattr(pipeline, 'transformer'):
+            pipeline.transformer = pipeline.transformer.to(torch.bfloat16)
+        # Convert VAE in pipeline to bfloat16 if available
+        if hasattr(pipeline, 'vae') and pipeline.vae is not None:
+            pipeline.vae = pipeline.vae.to(torch.bfloat16)
     
     # --- Setup Data ---
     dataset = LimitedLayoutTrainDataset(config['data_dir'], split="test", max_samples=max_samples)
@@ -532,14 +599,18 @@ if __name__ == '__main__':
     # 1. Setup Environment
     cuda_ok, dev_count = setup_cuda_environment()
     
-    # 2. Load Original Module
+    # 2. Apply Memory Optimization Patches (MUST be before loading infer_module)
+    # This patches ModelMixin.from_pretrained to force bfloat16
+    apply_memory_optimization_patches()
+    
+    # 3. Load Original Module
     infer_module = load_modified_infer_module(infer_py_path, dev_count)
     
-    # 3. Apply Optimizations
+    # 4. Apply Other Optimizations
     apply_lora_optimizations()
     apply_gpu_fuse_optimizations()
     
-    # 4. Load Config & Run
+    # 5. Load Config & Run
     config = infer_module.load_config(args.config_path)
     
     # Log memory settings
