@@ -69,23 +69,13 @@ class FP8QuantizedLinear(torch.nn.Module):
         # Store original weight shape
         original_shape = weight.shape
 
-        # Reshape for block-wise quantization
-        weight_flat = weight.view(-1, weight.shape[-1])
-        num_blocks = (weight_flat.shape[0] + self.block_size - 1) // self.block_size
+        # For simplicity, quantize per output feature (row-wise)
+        # weight shape is [out_features, in_features]
+        weight_flat = weight.view(weight.shape[0], -1)  # [out_features, in_features]
 
-        # Pad to make divisible by block_size
-        padded_rows = num_blocks * self.block_size
-        if weight_flat.shape[0] < padded_rows:
-            padding = torch.zeros(padded_rows - weight_flat.shape[0], weight_flat.shape[1],
-                                dtype=weight.dtype, device=weight.device)
-            weight_flat = torch.cat([weight_flat, padding], dim=0)
-
-        # Reshape for block processing: [num_blocks, block_size, in_features]
-        weight_blocks = weight_flat.view(num_blocks, self.block_size, -1)
-
-        # Calculate scales for each block (per-output feature group)
-        weight_abs = weight_blocks.abs()
-        scales = weight_abs.max(dim=1, keepdim=True)[0]  # [num_blocks, 1, in_features]
+        # Calculate scales per output feature
+        weight_abs = weight_flat.abs()
+        scales = weight_abs.max(dim=1, keepdim=True)[0]  # [out_features, 1]
 
         # Avoid division by zero
         scales = torch.clamp(scales, min=1e-8)
@@ -94,7 +84,7 @@ class FP8QuantizedLinear(torch.nn.Module):
         # FP8 E4M3: 1 sign bit, 4 exponent bits, 3 mantissa bits
         # Range: -448 to 448
         fp8_max = 448.0
-        normalized = weight_blocks / scales
+        normalized = weight_flat / scales
         quantized = torch.clamp(normalized, -fp8_max, fp8_max)
 
         # Convert to FP8 storage format (if available) or keep as float8
@@ -117,83 +107,108 @@ class FP8QuantizedLinear(torch.nn.Module):
         try:
             # If stored as float8_e4m3fn, convert back
             if hasattr(torch, 'float8_e4m3fn') and self.quantized_weight.dtype == torch.float8_e4m3fn:
-                dequantized_blocks = self.quantized_weight.to(torch.bfloat16) * self.scales
+                dequantized = self.quantized_weight.to(torch.bfloat16) * self.scales
             else:
                 # If stored as int8, convert back from simulation
                 fp8_max = 448.0
-                dequantized_blocks = (self.quantized_weight.to(torch.bfloat16) / 127 * fp8_max) * self.scales
+                dequantized = (self.quantized_weight.to(torch.bfloat16) / 127 * fp8_max) * self.scales
         except Exception as e:
-            print(f"[FP8] Dequantization error: {e}, falling back to original weights")
-            # Fallback: return zero or handle error gracefully
-            return F.linear(x, torch.zeros_like(self.bias.unsqueeze(-1)).expand(self.out_features, self.in_features).to(x.device), self.bias)
+            print(f"[FP8] Dequantization error: {e}, using zero weights")
+            # Fallback: return zero tensor with correct shape
+            return F.linear(x, torch.zeros(self.original_shape, dtype=torch.bfloat16, device=x.device), self.bias)
 
-        # Reshape back to original weight shape
-        dequantized = dequantized_blocks.view(-1, dequantized_blocks.shape[-1])[:self.original_shape[0]]
+        # Reshape back to original weight shape [out_features, in_features]
+        dequantized = dequantized.view(self.original_shape)
 
         # Standard linear operation
         return F.linear(x, dequantized, self.bias)
 
 
-class FP8QuantizedModule(torch.nn.Module):
+def apply_fp8_quantization_to_module(module, module_name=""):
     """
-    Wrapper that applies FP8 quantization to specific modules (like T5-XXL).
+    Apply FP8 quantization to Linear layers within a module, in-place.
+
+    Args:
+        module: The PyTorch module to quantize (e.g., T5EncoderModel)
+        module_name: Name of the module for logging
+
+    Returns:
+        Dict with quantization statistics
     """
-    def __init__(self, model, target_modules=['T5EncoderModel', 'T5DecoderModel']):
-        super().__init__()
-        self.model = model
-        self.target_modules = target_modules
-        self.fp8_layers = {}
+    if not FP8_AVAILABLE:
+        return {'quantized_layers': 0, 'memory_saved': 0}
 
-        # Apply FP8 quantization to target modules
-        self.quantize_model()
+    print(f"[FP8] Quantizing Linear layers in {module_name}...")
 
-    def quantize_model(self):
-        """Recursively quantize Linear layers in target modules."""
-        for name, module in self.model.named_modules():
-            # Check if this module is a target (T5 encoder/decoder)
-            is_target_module = any(target in name for target in self.target_modules)
+    quantized_layers = {}
+    total_memory_saved = 0
 
-            if is_target_module and isinstance(module, torch.nn.Linear):
-                print(f"[FP8] Quantizing layer: {name} ({module.in_features} -> {module.out_features})")
-                fp8_layer = FP8QuantizedLinear(module)
-                self.fp8_layers[name] = fp8_layer
+    for name, child_module in module.named_modules():
+        if isinstance(child_module, torch.nn.Linear):
+            print(f"[FP8]   Quantizing layer: {name} ({child_module.in_features} -> {child_module.out_features})")
 
-                # Replace the original layer
+            try:
+                # Create quantized version
+                fp8_layer = FP8QuantizedLinear(child_module)
+
+                # Replace the layer in its parent
                 parent_name = '.'.join(name.split('.')[:-1])
                 child_name = name.split('.')[-1]
 
+                parent = module
                 if parent_name:
-                    parent = self.model
                     for part in parent_name.split('.'):
                         parent = getattr(parent, part)
-                    setattr(parent, child_name, fp8_layer)
-                else:
-                    setattr(self.model, child_name, fp8_layer)
 
-    def forward(self, *args, **kwargs):
-        """Forward pass with dynamic FP8 decompression."""
-        return self.model(*args, **kwargs)
+                # Store original layer for potential rollback
+                original_layer = getattr(parent, child_name)
+                setattr(parent, child_name, fp8_layer)
 
-    def get_memory_stats(self):
-        """Get memory statistics for quantized model."""
-        total_params = sum(p.numel() for p in self.model.parameters())
-        fp8_params = sum(layer.quantized_weight.numel() for layer in self.fp8_layers.values())
+                # Calculate memory savings for this layer
+                original_params = child_module.in_features * child_module.out_features
+                if child_module.bias is not None:
+                    original_params += child_module.out_features
 
-        # Calculate memory usage
-        original_memory = total_params * 2  # BF16 = 2 bytes
-        fp8_memory = fp8_params * 1  # FP8 = 1 byte
-        other_memory = (total_params - fp8_params) * 2  # Non-quantized params
+                # Original memory: BF16 = 2 bytes per param
+                original_memory_bytes = original_params * 2
 
-        total_memory = fp8_memory + other_memory
+                # Quantized memory: FP8 weights + BF16 scales + BF16 bias
+                # FP8 weights: 1 byte per weight param
+                weight_params = child_module.in_features * child_module.out_features
+                quantized_memory_bytes = weight_params * 1  # FP8 weights
 
-        return {
-            'total_params': total_params,
-            'fp8_params': fp8_params,
-            'original_memory_mb': original_memory / (1024**2),
-            'quantized_memory_mb': total_memory / (1024**2),
-            'memory_savings_mb': (original_memory - total_memory) / (1024**2),
-            'compression_ratio': original_memory / total_memory if total_memory > 0 else 1.0
-        }
+                # Scales: small overhead, approximately weight_params / block_size
+                # For simplicity, estimate as 10% overhead for scales
+                scale_overhead = weight_params * 1 * 0.1  # Rough estimate
+                quantized_memory_bytes += scale_overhead
+
+                # Bias: remains BF16 if exists
+                if child_module.bias is not None:
+                    quantized_memory_bytes += child_module.out_features * 2
+
+                memory_saved_bytes = original_memory_bytes - quantized_memory_bytes
+
+                quantized_layers[name] = {
+                    'original_layer': original_layer,
+                    'quantized_layer': fp8_layer,
+                    'original_memory_mb': original_memory_bytes / (1024**2),
+                    'quantized_memory_mb': quantized_memory_bytes / (1024**2),
+                    'memory_saved_mb': memory_saved_bytes / (1024**2)
+                }
+
+                total_memory_saved += memory_saved_bytes / (1024**2)
+
+                print(f"[FP8]     Memory: {original_memory_bytes/(1024**2):.3f}MB → {quantized_memory_bytes/(1024**2):.3f}MB "
+                      f"(saved {memory_saved_bytes/(1024**2):.3f}MB)")
+
+            except Exception as e:
+                print(f"[FP8]   ❌ Failed to quantize {name}: {e}")
+
+    return {
+        'quantized_layers': len(quantized_layers),
+        'memory_saved': total_memory_saved,
+        'layer_details': quantized_layers
+    }
 
 
 def apply_fp8_quantization_to_pipeline(pipeline, config=None, target_modules=['T5EncoderModel']):
@@ -260,16 +275,16 @@ def apply_fp8_quantization_to_pipeline(pipeline, config=None, target_modules=['T
                         print(f"[FP8] {attr_name} is not T5-like, but has Linear layers - applying FP8 anyway")
 
                     try:
-                        quantized_module = FP8QuantizedModule(module, target_modules=[''])
-                        quantized_modules[attr_name] = quantized_module
+                        # Apply in-place quantization to the module
+                        stats = apply_fp8_quantization_to_module(module, attr_name)
 
-                        # Print memory stats
-                        stats = quantized_module.get_memory_stats()
-                        print(f"[FP8] ✅ {attr_name} quantized:")
-                        print(f"  - Original: {stats['original_memory_mb']:.1f}MB")
-                        print(f"  - Quantized: {stats['quantized_memory_mb']:.1f}MB")
-                        print(f"  - Saved: {stats['memory_savings_mb']:.1f}MB ({stats['compression_ratio']:.2f}x)")
-                        total_memory_saved += stats['memory_savings_mb']
+                        if stats['quantized_layers'] > 0:
+                            quantized_modules[attr_name] = stats
+                            total_memory_saved += stats['memory_saved']
+                            print(f"[FP8] ✅ {attr_name} quantized: {stats['quantized_layers']} layers, "
+                                  f"saved {stats['memory_saved']:.1f}MB")
+                        else:
+                            print(f"[FP8] ⚠️  No layers were quantized in {attr_name}")
 
                     except Exception as e:
                         print(f"[FP8] ❌ Failed to quantize {attr_name}: {e}")
@@ -288,17 +303,10 @@ def apply_fp8_quantization_to_pipeline(pipeline, config=None, target_modules=['T
         print("   Or if the pipeline doesn't have text encoders loaded")
         return pipeline
 
-    # Replace the modules in the pipeline
-    print("[FP8] Replacing modules in pipeline...")
-    for attr_name, quantized_module in quantized_modules.items():
-        try:
-            setattr(pipeline, attr_name, quantized_module)
-            print(f"[FP8] ✅ Replaced {attr_name} with quantized version")
-        except Exception as e:
-            print(f"[FP8] ❌ Failed to replace {attr_name}: {e}")
-
+    # No need to replace modules since we quantized in-place
     print(f"[FP8] 🎉 FP8 quantization completed! Total memory saved: {total_memory_saved:.1f}MB")
     print("[FP8] Note: This may slightly reduce output quality but saves significant VRAM")
+    print("[FP8] Quantized modules remain in their original locations in the pipeline")
 
     return pipeline
 
