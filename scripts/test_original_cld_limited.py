@@ -23,6 +23,9 @@ from pathlib import Path
 from collections import defaultdict
 from itertools import islice, chain
 
+# Set PyTorch CUDA memory allocation config to reduce fragmentation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 import torchvision.transforms as T
@@ -516,18 +519,27 @@ def run_inference(infer_module, config, max_samples=5):
     print(f"\n{'='*40}\nStarting Inference ({len(dataset)} samples)\n{'='*40}")
     
     for idx, batch in enumerate(loader):
-        print(f"Processing case {idx}...", flush=True)
+        print(f"\n{'='*60}")
+        print(f"Processing case {idx} (Sample {idx+1} of {len(dataset)})")
+        print(f"{'='*60}", flush=True)
         
         # Aggressive cleanup before generation
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         H, W = int(batch["height"][0]), int(batch["width"][0])
         adapter_img = batch["whole_img"][0]
         caption = batch["caption"][0]
         boxes = infer_module.get_input_box(batch["layout"][0])
+        
+        # Delete batch immediately to free memory before pipeline call
+        del batch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
+        # Generate layers using pipeline
         with torch.no_grad():
             x_hat, image_res, latents = pipeline(
                 prompt=caption,
@@ -543,9 +555,18 @@ def run_inference(infer_module, config, max_samples=5):
 
         # Move to CPU immediately to free VRAM
         x_hat = (x_hat + 1) / 2
-        x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).cpu().float()
+        x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).cpu().to(torch.float32)
         
-        del latents # Free latents
+        # Also move image_res to CPU immediately
+        if isinstance(image_res, torch.Tensor):
+            image_res = image_res.cpu()
+        elif isinstance(image_res, (list, tuple)):
+            image_res = [img.cpu() if isinstance(img, torch.Tensor) else img for img in image_res]
+        
+        # Delete latents immediately (not needed after this point)
+        del latents
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # Save results
         case_dir = save_root / f"case_{idx}"
@@ -555,6 +576,7 @@ def run_inference(infer_module, config, max_samples=5):
         whole_img_np = (x_hat[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         Image.fromarray(whole_img_np, "RGBA").save(case_dir / "whole_image_rgba.png")
         adapter_img.save(case_dir / "origin.png")
+        del whole_img_np  # Free immediately
         
         # 2. Background
         bg_np = (x_hat[1].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
@@ -562,17 +584,18 @@ def run_inference(infer_module, config, max_samples=5):
 
         # 3. Layers
         layers_tensor = x_hat[2:]
-        merged_img = image_res[1] if isinstance(image_res, list) else image_res
-        if isinstance(merged_img, torch.Tensor): merged_img = merged_img.cpu()
+        del x_hat  # Free x_hat after extracting layers
         
         # Re-composite logic (from code) to ensure quality
-        merged_pil = Image.fromarray(bg_np, "RGBA") # Start with background
+        merged_pil = Image.fromarray(bg_np, "RGBA")  # Start with background
 
         for l_idx in range(layers_tensor.shape[0]):
             l_np = (layers_tensor[l_idx].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
             l_pil = Image.fromarray(l_np, "RGBA")
             l_pil.save(case_dir / f"layer_{l_idx}_rgba.png")
             merged_pil = Image.alpha_composite(merged_pil, l_pil)
+            # Clean up immediately after each layer
+            del l_np, l_pil
 
         merged_pil.convert('RGB').save(save_root / "merged" / f"case_{idx}.png")
         merged_pil.convert('RGB').save(case_dir / f"case_{idx}.png")
@@ -580,8 +603,41 @@ def run_inference(infer_module, config, max_samples=5):
 
         print(f"✅ Saved case {idx}")
         
-        # Cleanup
-        del x_hat, image_res, layers_tensor, merged_pil
+        # Aggressive VRAM cleanup after each image
+        # Delete all intermediate variables
+        try:
+            del x_hat, image_res, layers_tensor, merged_pil
+            del whole_img_np, bg_np, l_np, l_pil
+        except NameError:
+            pass
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Clear CUDA cache aggressively
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Try to reclaim reserved memory
+            try:
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
+        
+        # Print memory usage for debugging
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            try:
+                device_id = torch.cuda.current_device()
+                allocated = torch.cuda.memory_allocated(device_id) / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved(device_id) / 1024**3  # GB
+                total_memory = torch.cuda.get_device_properties(device_id).total_memory / 1024**3  # GB
+                free = total_memory - reserved
+                print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved, {free:.2f} GB free (total: {total_memory:.2f} GB)", flush=True)
+            except (AssertionError, RuntimeError) as e:
+                # Fallback if device properties are not accessible
+                allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+                print(f"   💾 GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved", flush=True)
         
     print("\n✅ Inference Complete.")
 
