@@ -588,6 +588,43 @@ def inference_layout_limited(config, max_samples: int = 5):
     
     # 初始化 pipeline（使用原版邏輯）
     pipeline = infer_module.initialize_pipeline(config)
+    
+    # Check if LoRA adapters are properly loaded and activated
+    print("\n[DEBUG] Checking LoRA adapter status...", flush=True)
+    try:
+        # Check if pipeline has get_active_adapters method (diffusers standard)
+        if hasattr(pipeline, 'get_active_adapters'):
+            active_adapters = pipeline.get_active_adapters()
+            print(f"  Active adapters: {active_adapters}", flush=True)
+        else:
+            print("  ⚠️  Pipeline does not have get_active_adapters() method", flush=True)
+        
+        # Check adapter names
+        if hasattr(pipeline, 'get_adapter_names'):
+            adapter_names = pipeline.get_adapter_names()
+            print(f"  Available adapter names: {adapter_names}", flush=True)
+        else:
+            print("  ⚠️  Pipeline does not have get_adapter_names() method", flush=True)
+        
+        # If skip_fuse_lora=True, we need to explicitly enable the adapter
+        # because without fuse, the adapter might not be automatically activated
+        skip_fuse_lora = config.get('skip_fuse_lora', False)
+        if skip_fuse_lora:
+            print("  ⚠️  skip_fuse_lora=True: Need to explicitly enable adapter", flush=True)
+            # Try to set adapter explicitly (diffusers standard method)
+            if hasattr(pipeline, 'set_adapters'):
+                try:
+                    # The adapter was loaded with adapter_name="layer" in initialize_pipeline
+                    pipeline.set_adapters(["layer"], adapter_weights=[1.0])
+                    print("  ✅ Explicitly enabled adapter 'layer' with weight 1.0", flush=True)
+                except Exception as e:
+                    print(f"  ⚠️  Failed to set adapters: {e}", flush=True)
+            else:
+                print("  ⚠️  Pipeline does not have set_adapters() method", flush=True)
+                print("  ⚠️  LoRA might not be active without fuse!", flush=True)
+    except Exception as e:
+        print(f"  ⚠️  Error checking adapter status: {e}", flush=True)
+    print("", flush=True)
 
     # 創建 dataset（使用修改版，在初始化時就限制樣本數量）
     print(f"[INFO] 創建 dataset（將限制為前 {max_samples} 個樣本）...", flush=True)
