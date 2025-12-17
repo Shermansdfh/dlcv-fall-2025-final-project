@@ -595,7 +595,11 @@ def inference_layout_limited(config, max_samples: int = 5):
         # Check if pipeline has get_active_adapters method (diffusers standard)
         if hasattr(pipeline, 'get_active_adapters'):
             active_adapters = pipeline.get_active_adapters()
-            print(f"  Active adapters: {active_adapters}", flush=True)
+            print(f"  ✅ Active adapters: {active_adapters}", flush=True)
+            if active_adapters and 'layer' in active_adapters:
+                print(f"  ✅ Adapter 'layer' is active!", flush=True)
+            else:
+                print(f"  ⚠️  Adapter 'layer' is NOT in active adapters!", flush=True)
         else:
             print("  ⚠️  Pipeline does not have get_active_adapters() method", flush=True)
         
@@ -606,24 +610,60 @@ def inference_layout_limited(config, max_samples: int = 5):
         else:
             print("  ⚠️  Pipeline does not have get_adapter_names() method", flush=True)
         
-        # If skip_fuse_lora=True, we need to explicitly enable the adapter
-        # because without fuse, the adapter might not be automatically activated
+        # Check if transformer has LoRA layers (for PEFT-based LoRA)
+        if hasattr(pipeline, 'transformer'):
+            transformer = pipeline.transformer
+            print(f"\n[DEBUG] Checking transformer for LoRA layers...", flush=True)
+            
+            # Count LoRA layers in transformer
+            lora_layers_count = 0
+            lora_layer_names = []
+            for name, module in transformer.named_modules():
+                # Check for common LoRA layer patterns
+                if 'lora' in name.lower() or hasattr(module, 'lora_A') or hasattr(module, 'lora_B'):
+                    lora_layers_count += 1
+                    lora_layer_names.append(name)
+            
+            if lora_layers_count > 0:
+                print(f"  ✅ Found {lora_layers_count} LoRA layers in transformer", flush=True)
+                if lora_layers_count <= 10:
+                    print(f"  LoRA layer names: {lora_layer_names}", flush=True)
+                else:
+                    print(f"  First 10 LoRA layer names: {lora_layer_names[:10]}...", flush=True)
+            else:
+                print(f"  ⚠️  No LoRA layers found in transformer!", flush=True)
+                print(f"  ⚠️  This might indicate LoRA weights were not loaded correctly", flush=True)
+        
+        # If skip_fuse_lora=True, adapter should already be active via PEFT mechanism
         skip_fuse_lora = config.get('skip_fuse_lora', False)
         if skip_fuse_lora:
-            print("  ⚠️  skip_fuse_lora=True: Need to explicitly enable adapter", flush=True)
-            # Try to set adapter explicitly (diffusers standard method)
-            if hasattr(pipeline, 'set_adapters'):
-                try:
-                    # The adapter was loaded with adapter_name="layer" in initialize_pipeline
-                    pipeline.set_adapters(["layer"], adapter_weights=[1.0])
-                    print("  ✅ Explicitly enabled adapter 'layer' with weight 1.0", flush=True)
-                except Exception as e:
-                    print(f"  ⚠️  Failed to set adapters: {e}", flush=True)
-            else:
-                print("  ⚠️  Pipeline does not have set_adapters() method", flush=True)
-                print("  ⚠️  LoRA might not be active without fuse!", flush=True)
+            print(f"\n[DEBUG] skip_fuse_lora=True: LoRA should work via PEFT mechanism", flush=True)
+            if hasattr(pipeline, 'get_active_adapters'):
+                active = pipeline.get_active_adapters()
+                if active and 'layer' in active:
+                    print(f"  ✅ Adapter is active, LoRA should be working via PEFT", flush=True)
+                else:
+                    print(f"  ⚠️  Adapter is NOT active! This might be the problem!", flush=True)
+                    # Try to set adapter explicitly (diffusers standard method)
+                    if hasattr(pipeline, 'set_adapters'):
+                        try:
+                            # Try different ways to set adapter
+                            import inspect
+                            sig = inspect.signature(pipeline.set_adapters)
+                            print(f"  set_adapters signature: {sig}", flush=True)
+                            # The adapter was loaded with adapter_name="layer" in initialize_pipeline
+                            pipeline.set_adapters(["layer"], adapter_weights=[1.0])
+                            print("  ✅ Explicitly enabled adapter 'layer' with weight 1.0", flush=True)
+                        except Exception as e:
+                            print(f"  ⚠️  Failed to set adapters: {e}", flush=True)
+                            import traceback
+                            traceback.print_exc()
+                    else:
+                        print("  ⚠️  Pipeline does not have set_adapters() method", flush=True)
     except Exception as e:
         print(f"  ⚠️  Error checking adapter status: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
     print("", flush=True)
 
     # 創建 dataset（使用修改版，在初始化時就限制樣本數量）
