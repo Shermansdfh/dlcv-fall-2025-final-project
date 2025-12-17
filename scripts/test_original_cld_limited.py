@@ -1027,27 +1027,51 @@ def inference_layout_limited(config, max_samples: int = 5):
             torch.cuda.empty_cache()
         
         # Generate layers using pipeline（使用原版邏輯）
-        # Debug: 檢查 pipeline 類型
+        # Debug: 檢查 pipeline 類型並確定支持的參數
         print(f"[DEBUG] Pipeline type: {type(pipeline).__name__}", flush=True)
         print(f"[DEBUG] Pipeline class: {type(pipeline)}", flush=True)
+        
+        # 檢查 pipeline 是否支持 adapter_image 參數
+        supports_adapter_image = False
         if hasattr(pipeline, '__call__'):
             import inspect
-            sig = inspect.signature(pipeline.__call__)
-            print(f"[DEBUG] Pipeline.__call__ signature: {sig}", flush=True)
+            try:
+                sig = inspect.signature(pipeline.__call__)
+                print(f"[DEBUG] Pipeline.__call__ signature: {sig}", flush=True)
+                supports_adapter_image = 'adapter_image' in sig.parameters
+                if supports_adapter_image:
+                    print(f"[DEBUG] ✅ Pipeline supports 'adapter_image' parameter", flush=True)
+                else:
+                    print(f"[DEBUG] ⚠️  Pipeline does NOT support 'adapter_image' parameter", flush=True)
+                    print(f"[DEBUG] Available parameters: {list(sig.parameters.keys())}", flush=True)
+            except Exception as e:
+                print(f"[DEBUG] Could not inspect signature: {e}", flush=True)
+                # 如果無法檢查，嘗試根據類型判斷
+                from models.pipeline import CustomFluxPipelineCfgLayer
+                supports_adapter_image = isinstance(pipeline, CustomFluxPipelineCfgLayer)
+        
+        # 根據 pipeline 支持的參數構建調用參數
+        pipeline_kwargs = {
+            'prompt': caption,
+            'validation_box': layer_boxes,
+            'generator': generator,
+            'height': height,
+            'width': width,
+            'guidance_scale': config.get('cfg', 4.0),
+            'num_layers': len(layer_boxes),
+            'sdxl_vae': transp_vae,  # Use transparent VAE
+        }
+        
+        # 只有當 pipeline 支持 adapter_image 時才添加這些參數
+        if supports_adapter_image:
+            pipeline_kwargs['adapter_image'] = adapter_img
+            pipeline_kwargs['adapter_conditioning_scale'] = 0.9
+            print(f"[DEBUG] Using adapter_image for conditioning", flush=True)
+        else:
+            print(f"[DEBUG] Skipping adapter_image (not supported by this pipeline type)", flush=True)
         
         with torch.no_grad():
-            x_hat, image, latents = pipeline(
-                prompt=caption,
-                adapter_image=adapter_img,
-                adapter_conditioning_scale=0.9,
-                validation_box=layer_boxes,
-                generator=generator,
-                height=height,
-                width=width,
-                guidance_scale=config.get('cfg', 4.0),
-                num_layers=len(layer_boxes),
-                sdxl_vae=transp_vae,  # Use transparent VAE
-            )
+            x_hat, image, latents = pipeline(**pipeline_kwargs)
 
         # Adjust x_hat range from [-1, 1] to [0, 1]
         x_hat = (x_hat + 1) / 2
