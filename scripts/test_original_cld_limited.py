@@ -884,6 +884,29 @@ def inference_layout_limited(config, max_samples: int = 5):
     # 初始化 pipeline（使用原版邏輯）
     pipeline = infer_module.initialize_pipeline(config)
     
+    # Debug: 檢查 pipeline 類型並確保它是 CustomFluxPipelineCfgLayer
+    print(f"[DEBUG] Pipeline initialized, type: {type(pipeline).__name__}", flush=True)
+    print(f"[DEBUG] Pipeline class: {type(pipeline)}", flush=True)
+    
+    # 檢查 pipeline 類型，如果不是 CustomFluxPipelineCfgLayer，可能需要修復
+    from models.pipeline import CustomFluxPipelineCfgLayer
+    if not isinstance(pipeline, CustomFluxPipelineCfgLayer):
+        print(f"[WARNING] Pipeline is not CustomFluxPipelineCfgLayer, actual type: {type(pipeline).__name__}", flush=True)
+        print(f"[WARNING] This may cause 'adapter_image' parameter error", flush=True)
+        # 嘗試檢查是否有 adapter_image 參數
+        if hasattr(pipeline, '__call__'):
+            import inspect
+            try:
+                sig = inspect.signature(pipeline.__call__)
+                if 'adapter_image' not in sig.parameters:
+                    print(f"[ERROR] Pipeline.__call__ does NOT have 'adapter_image' parameter!", flush=True)
+                    print(f"[ERROR] Available parameters: {list(sig.parameters.keys())}", flush=True)
+                    raise ValueError(f"Pipeline type {type(pipeline).__name__} does not support 'adapter_image' parameter. Expected CustomFluxPipelineCfgLayer.")
+            except Exception as e:
+                print(f"[DEBUG] Could not inspect signature: {e}", flush=True)
+    else:
+        print(f"[DEBUG] ✅ Pipeline is CustomFluxPipelineCfgLayer", flush=True)
+    
     # Check if LoRA adapters are properly loaded and activated
     print("\n[DEBUG] Checking LoRA adapter status...", flush=True)
     try:
@@ -1004,6 +1027,14 @@ def inference_layout_limited(config, max_samples: int = 5):
             torch.cuda.empty_cache()
         
         # Generate layers using pipeline（使用原版邏輯）
+        # Debug: 檢查 pipeline 類型
+        print(f"[DEBUG] Pipeline type: {type(pipeline).__name__}", flush=True)
+        print(f"[DEBUG] Pipeline class: {type(pipeline)}", flush=True)
+        if hasattr(pipeline, '__call__'):
+            import inspect
+            sig = inspect.signature(pipeline.__call__)
+            print(f"[DEBUG] Pipeline.__call__ signature: {sig}", flush=True)
+        
         with torch.no_grad():
             x_hat, image, latents = pipeline(
                 prompt=caption,
