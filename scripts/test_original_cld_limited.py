@@ -492,20 +492,54 @@ def run_inference(infer_module, config, max_samples=5):
     if torch.cuda.is_available():
         print("[INFO] Converting VAE to bfloat16 for memory efficiency...", flush=True)
         transp_vae = transp_vae.to(torch.bfloat16)
-    
+
+        # Print VAE memory usage
+        vae_params = sum(p.numel() for p in transp_vae.parameters())
+        vae_memory_mb = vae_params * 2 / (1024 * 1024)  # bfloat16 = 2 bytes per param
+        print(f"[INFO] VAE parameters: {vae_params:,} ({vae_memory_mb:.1f} MB in bfloat16)")
+
     # --- Load Pipeline ---
     apply_skip_fuse_patch(config)
     pipeline = infer_module.initialize_pipeline(config)
-    
+
     # Ensure pipeline components are also in bfloat16
     if torch.cuda.is_available():
         print("[INFO] Ensuring pipeline components use bfloat16...", flush=True)
+
         # Convert transformer to bfloat16 if available
         if hasattr(pipeline, 'transformer'):
             pipeline.transformer = pipeline.transformer.to(torch.bfloat16)
-        # Convert VAE in pipeline to bfloat16 if available
+            transformer_params = sum(p.numel() for p in pipeline.transformer.parameters())
+            transformer_memory_mb = transformer_params * 2 / (1024 * 1024)
+            print(f"[INFO] Transformer parameters: {transformer_params:,} ({transformer_memory_mb:.1f} MB in bfloat16)")
+
+        # Convert VAE in pipeline to bfloat16 if available (different from our transp_vae)
         if hasattr(pipeline, 'vae') and pipeline.vae is not None:
             pipeline.vae = pipeline.vae.to(torch.bfloat16)
+
+        # Patch encode_in_chunks to be more memory efficient
+        if hasattr(pipeline, 'encode_in_chunks'):
+            original_encode_in_chunks = pipeline.encode_in_chunks
+
+            def memory_efficient_encode_in_chunks(vae, images, chunk=4):  # Reduced from default 8 to 4
+                """More memory efficient version of encode_in_chunks."""
+                parts = []
+                for i in range(0, images.shape[0], chunk):
+                    chunk_img = images[i : i + chunk]
+                    part_latent = vae.encode(chunk_img).latent_dist.sample()
+                    parts.append(part_latent)
+                    # More aggressive cleanup
+                    del part_latent, chunk_img
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                return torch.cat(parts, dim=0)
+
+            pipeline.encode_in_chunks = memory_efficient_encode_in_chunks
+            print("[INFO] Patched encode_in_chunks for better memory efficiency")
+
+        # Force garbage collection after conversions
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     
     # --- Setup Data ---
     dataset = LimitedLayoutTrainDataset(config['data_dir'], split="test", max_samples=max_samples)
@@ -523,19 +557,36 @@ def run_inference(infer_module, config, max_samples=5):
         print(f"Processing case {idx} (Sample {idx+1} of {len(dataset)})")
         print(f"{'='*60}", flush=True)
         
+        # Ensure models are still in bfloat16 (sometimes operations can change dtype)
+        if torch.cuda.is_available():
+            try:
+                if hasattr(pipeline, 'transformer') and next(pipeline.transformer.parameters()).dtype != torch.bfloat16:
+                    print("   ⚠️  Transformer dtype changed, reconverting to bfloat16...", flush=True)
+                    pipeline.transformer = pipeline.transformer.to(torch.bfloat16)
+                if hasattr(pipeline, 'vae') and pipeline.vae and next(pipeline.vae.parameters()).dtype != torch.bfloat16:
+                    print("   ⚠️  Pipeline VAE dtype changed, reconverting to bfloat16...", flush=True)
+                    pipeline.vae = pipeline.vae.to(torch.bfloat16)
+                if next(transp_vae.parameters()).dtype != torch.bfloat16:
+                    print("   ⚠️  Transp VAE dtype changed, reconverting to bfloat16...", flush=True)
+                    transp_vae = transp_vae.to(torch.bfloat16)
+            except (StopIteration, RuntimeError):
+                pass  # No parameters to check
+
         # Aggressive cleanup before generation
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
 
+        # Extract data from batch BEFORE deleting it
         H, W = int(batch["height"][0]), int(batch["width"][0])
-        adapter_img = batch["whole_img"][0]
-        caption = batch["caption"][0]
-        boxes = infer_module.get_input_box(batch["layout"][0])
-        
+        adapter_img = batch["whole_img"][0]  # PIL Image
+        caption = batch["caption"][0]  # String
+        layout_boxes = batch["layout"][0]  # List/tensor
+        boxes = infer_module.get_input_box(layout_boxes)  # Processed boxes
+
         # Delete batch immediately to free memory before pipeline call
-        del batch
+        del batch, layout_boxes
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -552,6 +603,11 @@ def run_inference(infer_module, config, max_samples=5):
                 num_layers=len(boxes),
                 sdxl_vae=transp_vae,
             )
+
+        # Clean up input variables that are no longer needed
+        del caption, boxes, adapter_img
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Move to CPU immediately to free VRAM
         x_hat = (x_hat + 1) / 2
@@ -576,8 +632,8 @@ def run_inference(infer_module, config, max_samples=5):
         whole_img_np = (x_hat[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         Image.fromarray(whole_img_np, "RGBA").save(case_dir / "whole_image_rgba.png")
         adapter_img.save(case_dir / "origin.png")
-        del whole_img_np  # Free immediately
-        
+        del whole_img_np, adapter_img  # Free immediately
+
         # 2. Background
         bg_np = (x_hat[1].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         Image.fromarray(bg_np, "RGBA").save(case_dir / "background_rgba.png")
@@ -585,6 +641,8 @@ def run_inference(infer_module, config, max_samples=5):
         # 3. Layers
         layers_tensor = x_hat[2:]
         del x_hat  # Free x_hat after extracting layers
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Clear cache after freeing x_hat
         
         # Re-composite logic (from code) to ensure quality
         merged_pil = Image.fromarray(bg_np, "RGBA")  # Start with background
@@ -672,6 +730,13 @@ if __name__ == '__main__':
     # Log memory settings
     if config.get('skip_fuse_lora'):
         print("[CONFIG] skip_fuse_lora=True (Memory Saving Mode)")
+
+    # Log memory optimization status
+    print("[MEMORY] Memory optimizations active:")
+    print("  - Models loaded in bfloat16 (50% memory reduction)")
+    print("  - encode_in_chunks patched with chunk_size=4")
+    print("  - Aggressive cleanup between images")
+    print("  - Low CPU memory usage enabled")
 
     try:
         run_inference(infer_module, config, args.max_samples)
