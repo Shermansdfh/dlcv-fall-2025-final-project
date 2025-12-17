@@ -517,25 +517,27 @@ def run_inference(infer_module, config, max_samples=5):
         if hasattr(pipeline, 'vae') and pipeline.vae is not None:
             pipeline.vae = pipeline.vae.to(torch.bfloat16)
 
-        # Patch encode_in_chunks to be more memory efficient
-        if hasattr(pipeline, 'encode_in_chunks'):
-            original_encode_in_chunks = pipeline.encode_in_chunks
+        # Note: encode_in_chunks has been optimized directly in the source code
 
-            def memory_efficient_encode_in_chunks(vae, images, chunk=4):  # Reduced from default 8 to 4
-                """More memory efficient version of encode_in_chunks."""
-                parts = []
-                for i in range(0, images.shape[0], chunk):
-                    chunk_img = images[i : i + chunk]
-                    part_latent = vae.encode(chunk_img).latent_dist.sample()
-                    parts.append(part_latent)
-                    # More aggressive cleanup
-                    del part_latent, chunk_img
+        # Patch the problematic decode section in pipeline.__call__
+        if hasattr(pipeline, '__call__'):
+            original_call = pipeline.__call__
+
+            def memory_efficient_call(self, *args, **kwargs):
+                # Call the original method, but we'll patch the decode part
+                # The decode happens inside the original __call__, so we need to patch it there
+                # For now, we'll add a more aggressive cleanup after the call
+                result = original_call(*args, **kwargs)
+
+                # More aggressive cleanup after pipeline call
+                if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                return torch.cat(parts, dim=0)
 
-            pipeline.encode_in_chunks = memory_efficient_encode_in_chunks
-            print("[INFO] Patched encode_in_chunks for better memory efficiency")
+                return result
+
+            # Note: Actually patching __call__ might be too invasive. Let's try a different approach.
+            # We'll patch the VAE decode method instead to be more memory efficient for multiple segments
 
         # Force garbage collection after conversions
         torch.cuda.empty_cache()
@@ -591,6 +593,7 @@ def run_inference(infer_module, config, max_samples=5):
             torch.cuda.empty_cache()
 
         # Generate layers using pipeline
+        print(f"[DEBUG] Starting pipeline call (before: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated)")
         with torch.no_grad():
             x_hat, image_res, latents = pipeline(
                 prompt=caption,
@@ -604,10 +607,13 @@ def run_inference(infer_module, config, max_samples=5):
                 sdxl_vae=transp_vae,
             )
 
+        print(f"[DEBUG] Pipeline call completed (after: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated)")
+
         # Clean up input variables that are no longer needed
         del caption, boxes, adapter_img
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            print(f"[DEBUG] After input cleanup: {torch.cuda.memory_allocated()/1024**3:.2f}GB allocated)")
 
         # Move to CPU immediately to free VRAM
         x_hat = (x_hat + 1) / 2
@@ -632,7 +638,8 @@ def run_inference(infer_module, config, max_samples=5):
         whole_img_np = (x_hat[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         Image.fromarray(whole_img_np, "RGBA").save(case_dir / "whole_image_rgba.png")
         adapter_img.save(case_dir / "origin.png")
-        del whole_img_np, adapter_img  # Free immediately
+        del whole_img_np  # Free whole_img_np immediately
+        # Note: adapter_img will be deleted later with other variables
 
         # 2. Background
         bg_np = (x_hat[1].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
@@ -665,7 +672,8 @@ def run_inference(infer_module, config, max_samples=5):
         # Delete all intermediate variables
         try:
             del x_hat, image_res, layers_tensor, merged_pil
-            del whole_img_np, bg_np, l_np, l_pil
+            del bg_np, l_np, l_pil, adapter_img
+            # Note: whole_img_np is already deleted earlier
         except NameError:
             pass
         
@@ -734,7 +742,8 @@ if __name__ == '__main__':
     # Log memory optimization status
     print("[MEMORY] Memory optimizations active:")
     print("  - Models loaded in bfloat16 (50% memory reduction)")
-    print("  - encode_in_chunks patched with chunk_size=4")
+    print("  - encode_in_chunks optimized with chunk_size=4")
+    print("  - decode_segments optimized with chunk_size=4 (prevents memory spike)")
     print("  - Aggressive cleanup between images")
     print("  - Low CPU memory usage enabled")
 
