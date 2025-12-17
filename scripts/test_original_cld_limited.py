@@ -758,7 +758,8 @@ def inference_layout_limited(config, max_samples: int = 5):
     )
 
     generator = torch.Generator(device=device).manual_seed(config.get('seed', 42))
-
+    import gc  # 用於強制垃圾回收，幫助釋放 VRAM
+    
     idx = 0
     actual_samples = len(dataset)  # 獲取實際的樣本數量
     for batch in loader:
@@ -780,25 +781,41 @@ def inference_layout_limited(config, max_samples: int = 5):
         else:
             print(f"[DEBUG] Caption: {caption}", flush=True)
 
+        # 在每次推理前嘗試清一次 CUDA cache（避免前一張圖殘留佔用 VRAM）
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         # Generate layers using pipeline（使用原版邏輯）
-        x_hat, image, latents = pipeline(
-            prompt=caption,
-            adapter_image=adapter_img,
-            adapter_conditioning_scale=0.9,
-            validation_box=layer_boxes,
-            generator=generator,
-            height=height,
-            width=width,
-            guidance_scale=config.get('cfg', 4.0),
-            num_layers=len(layer_boxes),
-            sdxl_vae=transp_vae,  # Use transparent VAE
-        )
+        with torch.no_grad():
+            x_hat, image, latents = pipeline(
+                prompt=caption,
+                adapter_image=adapter_img,
+                adapter_conditioning_scale=0.9,
+                validation_box=layer_boxes,
+                generator=generator,
+                height=height,
+                width=width,
+                guidance_scale=config.get('cfg', 4.0),
+                num_layers=len(layer_boxes),
+                sdxl_vae=transp_vae,  # Use transparent VAE
+            )
 
         # Adjust x_hat range from [-1, 1] to [0, 1]
         x_hat = (x_hat + 1) / 2
 
-        # Remove batch dimension and ensure float32 dtype
-        x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).to(torch.float32)
+        # Remove batch dimension，並立刻搬到 CPU，減少 GPU VRAM 佔用
+        x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).cpu().to(torch.float32)
+        
+        # 同樣把 image 搬到 CPU
+        if isinstance(image, torch.Tensor):
+            image = image.cpu()
+        elif isinstance(image, (list, tuple)):
+            image = [img.cpu() if isinstance(img, torch.Tensor) else img for img in image]
+        
+        # latents 之後不再用，直接刪掉並清理 cache
+        del latents
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         this_index = f"case_{idx}"
         case_dir = os.path.join(config['save_dir'], this_index)
@@ -862,6 +879,26 @@ def inference_layout_limited(config, max_samples: int = 5):
 
         print(f"✅ Saved case {idx} to {case_dir}")
         idx += 1
+
+        # === 每張圖片之後做一次強制清理，盡量釋放 VRAM ===
+        try:
+            # 刪掉本輪大 tensor 變數
+            del x_hat
+            del image
+            del merged_image
+        except NameError:
+            pass
+
+        # Python 垃圾回收
+        gc.collect()
+
+        # CUDA 記憶體回收
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
 
     del pipeline
     if torch.cuda.is_available():
@@ -927,4 +964,5 @@ if __name__ == '__main__':
         import traceback
         traceback.print_exc()
         raise SystemExit(1)
+
 
