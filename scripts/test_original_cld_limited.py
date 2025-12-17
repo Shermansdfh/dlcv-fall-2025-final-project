@@ -247,41 +247,118 @@ except Exception as e:
     print(f"⚠️  Warning: Error applying LoRA loading optimization: {e}")
     print("   LoRA loading will use default method (may be slower)")
 
-# Patch fuse_lora and unload_lora to add timing (similar to infer_dlcv.py)
+# Optimize fuse_lora to run on GPU with better performance
+print("[INFO] Optimizing fuse_lora for GPU execution...", flush=True)
 try:
     from models.mmdit import CustomFluxTransformer2DModel
+    from models.multiLayer_adapter import MultiLayerAdapter
     
+    # Store original fuse_lora methods
     if hasattr(CustomFluxTransformer2DModel, 'fuse_lora'):
-        original_fuse_lora = CustomFluxTransformer2DModel.fuse_lora
+        original_fuse_lora_transformer = CustomFluxTransformer2DModel.fuse_lora
         
-        def timed_fuse_lora(self, *args, **kwargs):
+        def optimized_fuse_lora_transformer(self, *args, **kwargs):
+            """
+            Optimized fuse_lora that ensures:
+            1. Model is on GPU
+            2. All operations run on GPU
+            3. Proper synchronization
+            4. Timing information
+            """
             import time
-            print("[DEBUG] fuse_lora: Starting...", flush=True)
-            start = time.time()
-            result = original_fuse_lora(self, *args, **kwargs)
-            elapsed = time.time() - start
-            print(f"[DEBUG] fuse_lora: Completed in {elapsed:.2f}s", flush=True)
+            print("[DEBUG] fuse_lora (Transformer): Starting GPU-optimized fusion...", flush=True)
+            
+            # Ensure model is on GPU
+            device = next(self.parameters()).device
+            if device.type != 'cuda':
+                print(f"  ⚠️  Warning: Model is on {device}, moving to GPU...", flush=True)
+                self.to('cuda')
+                device = 'cuda'
+            else:
+                print(f"  ✅ Model is on GPU: {device}", flush=True)
+            
+            # Ensure all parameters are on GPU
+            for name, param in self.named_parameters():
+                if param.device.type != 'cuda':
+                    print(f"  ⚠️  Moving parameter {name} to GPU...", flush=True)
+                    param.data = param.data.to('cuda')
+            
+            # Clear cache before fusion
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            start_time = time.time()
+            
+            # Call original fuse_lora
+            result = original_fuse_lora_transformer(self, *args, **kwargs)
+            
+            # Synchronize to ensure all GPU operations complete
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
+            elapsed = time.time() - start_time
+            print(f"  ✅ fuse_lora (Transformer): Completed in {elapsed:.2f}s on GPU", flush=True)
+            
             return result
         
-        CustomFluxTransformer2DModel.fuse_lora = timed_fuse_lora
+        CustomFluxTransformer2DModel.fuse_lora = optimized_fuse_lora_transformer
+        print("  ✅ Optimized CustomFluxTransformer2DModel.fuse_lora", flush=True)
     
-    if hasattr(CustomFluxTransformer2DModel, 'unload_lora'):
-        original_unload_lora = CustomFluxTransformer2DModel.unload_lora
+    if hasattr(MultiLayerAdapter, 'fuse_lora'):
+        original_fuse_lora_adapter = MultiLayerAdapter.fuse_lora
         
-        def timed_unload_lora(self, *args, **kwargs):
+        def optimized_fuse_lora_adapter(self, *args, **kwargs):
+            """
+            Optimized fuse_lora for MultiLayerAdapter that ensures GPU execution
+            """
             import time
-            print("[DEBUG] unload_lora: Starting...", flush=True)
-            start = time.time()
-            result = original_unload_lora(self, *args, **kwargs)
-            elapsed = time.time() - start
-            print(f"[DEBUG] unload_lora: Completed in {elapsed:.2f}s", flush=True)
+            print("[DEBUG] fuse_lora (MultiLayerAdapter): Starting GPU-optimized fusion...", flush=True)
+            
+            # Ensure model is on GPU
+            device = next(self.parameters()).device
+            if device.type != 'cuda':
+                print(f"  ⚠️  Warning: MultiLayerAdapter is on {device}, moving to GPU...", flush=True)
+                self.to('cuda')
+                device = 'cuda'
+            else:
+                print(f"  ✅ MultiLayerAdapter is on GPU: {device}", flush=True)
+            
+            # Ensure all parameters are on GPU
+            for name, param in self.named_parameters():
+                if param.device.type != 'cuda':
+                    print(f"  ⚠️  Moving parameter {name} to GPU...", flush=True)
+                    param.data = param.data.to('cuda')
+            
+            # Clear cache before fusion
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
+            start_time = time.time()
+            
+            # Call original fuse_lora
+            result = original_fuse_lora_adapter(self, *args, **kwargs)
+            
+            # Synchronize to ensure all GPU operations complete
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            
+            elapsed = time.time() - start_time
+            print(f"  ✅ fuse_lora (MultiLayerAdapter): Completed in {elapsed:.2f}s on GPU", flush=True)
+            
             return result
         
-        CustomFluxTransformer2DModel.unload_lora = timed_unload_lora
-except ImportError:
-    print("[DEBUG] Could not patch fuse_lora/unload_lora (models.mmdit not available)", flush=True)
+        MultiLayerAdapter.fuse_lora = optimized_fuse_lora_adapter
+        print("  ✅ Optimized MultiLayerAdapter.fuse_lora", flush=True)
+    
+    print("✅ GPU-optimized fuse_lora patches applied", flush=True)
+except ImportError as e:
+    print(f"⚠️  Warning: Could not optimize fuse_lora: {e}", flush=True)
 except Exception as e:
-    print(f"[DEBUG] Warning: Error patching fuse_lora/unload_lora: {e}", flush=True)
+    print(f"⚠️  Warning: Error optimizing fuse_lora: {e}", flush=True)
+    import traceback
+    traceback.print_exc()
 
 
 def apply_skip_fuse_lora_patch(config):
