@@ -109,8 +109,23 @@ try:
                 else:
                     print(f"  ℹ️  已提供 quantization_config，跳過自動設置", flush=True)
                 
-                # T5 量化加載通常需要 device_map，但在 diffusers pipeline 中可能會自動處理
-                # 這裡不強制設置 device_map，讓 transformers 自動處理
+                # 對於量化的 T5，必須明確設置 device_map 以避免 accelerate 的 meta tensor 錯誤
+                # 使用 device_map="cuda" 確保直接加載到 GPU，避免 accelerate 的自動設備映射
+                if 'device_map' not in kwargs:
+                    if torch.cuda.is_available():
+                        kwargs['device_map'] = "cuda"
+                        print(f"  ✅ 設置 device_map='cuda' 以確保量化模型正確加載到 GPU", flush=True)
+                    else:
+                        kwargs['device_map'] = "cpu"
+                        print(f"  ⚠️  CUDA 不可用，設置 device_map='cpu'", flush=True)
+                else:
+                    print(f"  ℹ️  已提供 device_map，使用用戶設置: {kwargs.get('device_map')}", flush=True)
+                
+                # 禁用 low_cpu_mem_usage，因為量化模型需要特殊處理
+                # 如果設置了 low_cpu_mem_usage，可能會導致 meta tensor 錯誤
+                if kwargs.get('low_cpu_mem_usage', False):
+                    print(f"  ⚠️  警告：low_cpu_mem_usage=True 可能與量化模型衝突，改為 False", flush=True)
+                    kwargs['low_cpu_mem_usage'] = False
             except ImportError:
                 print(f"  ⚠️  Warning: bitsandbytes 未安裝，無法使用 NF4 量化", flush=True)
                 print(f"     安裝方式: pip install bitsandbytes", flush=True)
