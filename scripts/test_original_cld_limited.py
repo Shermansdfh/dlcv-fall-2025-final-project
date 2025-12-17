@@ -218,59 +218,88 @@ def apply_fp8_quantization_to_pipeline(pipeline, config=None, target_modules=['T
         return pipeline
 
     print("[FP8] Applying FP8 quantization to pipeline...", flush=True)
+    print(f"[FP8] Pipeline type: {type(pipeline).__name__}")
 
-    # Look for T5/text encoder modules in the pipeline
+    # For diffusers pipelines, directly check common text encoder attributes
+    # This is more reliable than trying to use named_modules()
     quantized_modules = {}
+    total_memory_saved = 0
 
-    for name, module in pipeline.named_modules():
-        # Check for T5-related modules
-        is_t5_module = any(target in name for target in target_modules) or \
-                      ('text_encoder' in name and hasattr(module, 'encoder')) or \
-                      ('t5' in name.lower())
+    # Common text encoder attributes in diffusers FLUX pipelines
+    text_encoder_candidates = [
+        'text_encoder',      # CLIP text encoder
+        'text_encoder_2',    # T5 text encoder (FLUX.1-pro)
+        'text_encoder_3',    # Additional text encoders if any
+        't5_encoder',        # Direct T5 encoder
+        't5_decoder',        # T5 decoder (usually not needed for inference)
+    ]
 
-        if is_t5_module:
-            print(f"[FP8] Found potential T5/text encoder module: {name} (type: {type(module).__name__})")
+    print("[FP8] Checking for text encoders in pipeline...")
 
-            # Check if it's a T5 model or text encoder with Linear layers
-            has_linear_layers = any(isinstance(child, torch.nn.Linear)
-                                  for child in module.modules())
+    for attr_name in text_encoder_candidates:
+        if hasattr(pipeline, attr_name):
+            module = getattr(pipeline, attr_name)
+            if module is not None and hasattr(module, 'parameters'):
+                print(f"[FP8] Found text encoder: {attr_name} (type: {type(module).__name__})")
 
-            if has_linear_layers:
-                print(f"[FP8] Quantizing Linear layers in: {name}")
-                try:
-                    quantized_modules[name] = FP8QuantizedModule(module, target_modules=[''])
-                    print(f"[FP8] ✅ Applied FP8 quantization to: {name}")
-                except Exception as e:
-                    print(f"[FP8] ❌ Failed to quantize {name}: {e}")
+                # Check if it has Linear layers (most text encoders do)
+                linear_layers = [child for child in module.modules() if isinstance(child, torch.nn.Linear)]
+                num_linear = len(linear_layers)
+
+                if num_linear > 0:
+                    print(f"[FP8] Found {num_linear} Linear layers in {attr_name}")
+
+                    # Check if it's a T5 model (larger models benefit more from quantization)
+                    is_t5_like = ('t5' in attr_name.lower() or
+                                'T5' in type(module).__name__ or
+                                any('T5' in type(layer).__name__ for layer in module.modules()))
+
+                    if is_t5_like:
+                        print(f"[FP8] ✅ {attr_name} appears to be a T5-like model, applying FP8 quantization")
+                    else:
+                        print(f"[FP8] {attr_name} is not T5-like, but has Linear layers - applying FP8 anyway")
+
+                    try:
+                        quantized_module = FP8QuantizedModule(module, target_modules=[''])
+                        quantized_modules[attr_name] = quantized_module
+
+                        # Print memory stats
+                        stats = quantized_module.get_memory_stats()
+                        print(f"[FP8] ✅ {attr_name} quantized:")
+                        print(f"  - Original: {stats['original_memory_mb']:.1f}MB")
+                        print(f"  - Quantized: {stats['quantized_memory_mb']:.1f}MB")
+                        print(f"  - Saved: {stats['memory_savings_mb']:.1f}MB ({stats['compression_ratio']:.2f}x)")
+                        total_memory_saved += stats['memory_savings_mb']
+
+                    except Exception as e:
+                        print(f"[FP8] ❌ Failed to quantize {attr_name}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                else:
+                    print(f"[FP8] {attr_name} has no Linear layers, skipping")
             else:
-                print(f"[FP8] Skipping {name} (no Linear layers found)")
+                print(f"[FP8] {attr_name} is None or not a proper module")
+        else:
+            print(f"[FP8] {attr_name} not found in pipeline")
 
     if not quantized_modules:
-        print("⚠️  No suitable modules found for FP8 quantization")
+        print("⚠️  No suitable text encoders found for FP8 quantization")
         print("   This is normal if using FLUX.1-dev (CLIP only) instead of FLUX.1-pro (T5)")
+        print("   Or if the pipeline doesn't have text encoders loaded")
         return pipeline
 
-    # Replace modules in pipeline
-    total_memory_saved = 0
-    for module_path, quantized_module in quantized_modules.items():
+    # Replace the modules in the pipeline
+    print("[FP8] Replacing modules in pipeline...")
+    for attr_name, quantized_module in quantized_modules.items():
         try:
-            path_parts = module_path.split('.')
-            parent = pipeline
-            for part in path_parts[:-1]:
-                parent = getattr(parent, part)
-            setattr(parent, path_parts[-1], quantized_module)
-
-            # Print memory stats
-            stats = quantized_module.get_memory_stats()
-            print(f"[FP8] {module_path} memory: {stats['original_memory_mb']:.1f}MB → {stats['quantized_memory_mb']:.1f}MB "
-                  f"(saved {stats['memory_savings_mb']:.1f}MB, {stats['compression_ratio']:.2f}x)")
-            total_memory_saved += stats['memory_savings_mb']
+            setattr(pipeline, attr_name, quantized_module)
+            print(f"[FP8] ✅ Replaced {attr_name} with quantized version")
         except Exception as e:
-            print(f"[FP8] ❌ Failed to replace module {module_path}: {e}")
+            print(f"[FP8] ❌ Failed to replace {attr_name}: {e}")
 
-    if total_memory_saved > 0:
-        print(f"[FP8] ✅ Total memory saved: {total_memory_saved:.1f}MB")
-    print("[FP8] FP8 quantization setup completed")
+    print(f"[FP8] 🎉 FP8 quantization completed! Total memory saved: {total_memory_saved:.1f}MB")
+    print("[FP8] Note: This may slightly reduce output quality but saves significant VRAM")
+
     return pipeline
 
 # Third-party optional imports (handled in code or assumed present)
