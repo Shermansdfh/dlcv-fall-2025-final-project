@@ -349,50 +349,101 @@ class LimitedLayoutTrainDataset(Dataset):
         from PIL import Image
         
         print(f"[INFO] 加載 PrismLayersPro dataset（split={split}）...", flush=True)
-        print(f"[INFO] 注意：HuggingFace 會下載 metadata 文件（~400-500MB），這是正常的", flush=True)
+        print(f"[INFO] 使用 streaming 模式以避免下載整個數據集元數據", flush=True)
         print(f"[INFO] 圖片會按需下載，只會下載實際訪問的樣本", flush=True)
         
-        full_dataset = load_dataset(
+        # 使用 streaming=True 來避免下載整個數據集的元數據
+        # 這對於大型數據集非常重要，可以節省大量時間和空間
+        streaming_dataset = load_dataset(
             "artplus/PrismLayersPro",
             cache_dir=data_dir,
+            streaming=True,  # 啟用流式加載，避免下載所有元數據
         )
-        full_dataset = concatenate_datasets(list(full_dataset.values()))
-
-        if "style_category" not in full_dataset.column_names:
-            raise ValueError("Dataset must contain a 'style_category' field to split by class.")
-
-        categories = np.array(full_dataset["style_category"])
-        category_to_indices = defaultdict(list)
-        for i, cat in enumerate(categories):
-            category_to_indices[cat].append(i)
-
-        subsets = []
-        for cat, indices in category_to_indices.items():
-            total_len = len(indices)
-            idx_90 = int(total_len * 0.9)
-            idx_95 = int(total_len * 0.95)
-
-            if split == "train":
-                selected_idx = indices[:idx_90]
-            elif split == "test":
-                selected_idx = indices[idx_90:idx_95]
-            elif split == "val":
-                selected_idx = indices[idx_95:]
-            else:
-                raise ValueError("split must be 'train', 'val', or 'test'")
-
-            subsets.append(full_dataset.select(selected_idx))
-
-        # 合併所有 subsets
-        combined_dataset = concatenate_datasets(subsets)
         
-        # 在初始化時就限制樣本數量
-        if max_samples is not None and max_samples > 0:
-            actual_samples = min(max_samples, len(combined_dataset))
-            print(f"[INFO] 限制樣本數量：{len(combined_dataset)} → {actual_samples}", flush=True)
-            self.dataset = combined_dataset.select(range(actual_samples))
+        # 對於小樣本測試（max_samples 很小），簡化邏輯：
+        # 直接從 streaming dataset 中取樣本，跳過複雜的 style_category 分組
+        if max_samples is not None and max_samples > 0 and max_samples < 100:
+            print(f"[INFO] 小樣本模式：直接從 streaming dataset 取前 {max_samples} 個樣本", flush=True)
+            print(f"[INFO] 跳過 style_category 分組以加快加載速度", flush=True)
+            
+            # 合併所有 splits 的流式數據集
+            from itertools import islice, chain
+            all_streams = []
+            for split_name, split_dataset in streaming_dataset.items():
+                all_streams.append(split_dataset)
+            
+            # 合併所有流並取前 max_samples 個樣本
+            combined_stream = chain(*all_streams)
+            limited_items = list(islice(combined_stream, max_samples))
+            
+            # 轉換為可索引的 Dataset
+            from datasets import Dataset
+            self.dataset = Dataset.from_list(limited_items)
+            print(f"[INFO] ✅ 已加載 {len(self.dataset)} 個樣本（使用 streaming 模式）", flush=True)
         else:
-            self.dataset = combined_dataset
+            # 對於大樣本或需要完整分組的情況，需要收集足夠的樣本來進行分組
+            # 為了進行 style_category 分組，我們需要收集比 max_samples 更多的樣本
+            sample_multiplier = 10 if max_samples else 1
+            target_samples = (max_samples * sample_multiplier) if max_samples else None
+            
+            print(f"[INFO] 收集樣本以進行 style_category 分組...", flush=True)
+            if target_samples:
+                print(f"[INFO] 目標收集 {target_samples} 個樣本（用於分組）", flush=True)
+            
+            # 收集樣本
+            from itertools import islice, chain
+            all_streams = []
+            for split_name, split_dataset in streaming_dataset.items():
+                all_streams.append(split_dataset)
+            
+            combined_stream = chain(*all_streams)
+            if target_samples:
+                collected_items = list(islice(combined_stream, target_samples))
+            else:
+                # 如果沒有 max_samples 限制，收集所有樣本（這可能會很慢）
+                print(f"[INFO] ⚠️  警告：沒有 max_samples 限制，將收集所有樣本（這可能需要很長時間）", flush=True)
+                collected_items = list(combined_stream)
+            
+            # 轉換為可索引的 Dataset
+            from datasets import Dataset
+            full_dataset = Dataset.from_list(collected_items)
+            print(f"[INFO] 已收集 {len(full_dataset)} 個樣本", flush=True)
+
+            if "style_category" not in full_dataset.column_names:
+                raise ValueError("Dataset must contain a 'style_category' field to split by class.")
+
+            categories = np.array(full_dataset["style_category"])
+            category_to_indices = defaultdict(list)
+            for i, cat in enumerate(categories):
+                category_to_indices[cat].append(i)
+
+            subsets = []
+            for cat, indices in category_to_indices.items():
+                total_len = len(indices)
+                idx_90 = int(total_len * 0.9)
+                idx_95 = int(total_len * 0.95)
+
+                if split == "train":
+                    selected_idx = indices[:idx_90]
+                elif split == "test":
+                    selected_idx = indices[idx_90:idx_95]
+                elif split == "val":
+                    selected_idx = indices[idx_95:]
+                else:
+                    raise ValueError("split must be 'train', 'val', or 'test'")
+
+                subsets.append(full_dataset.select(selected_idx))
+
+            # 合併所有 subsets
+            combined_dataset = concatenate_datasets(subsets)
+            
+            # 在初始化時就限制樣本數量
+            if max_samples is not None and max_samples > 0:
+                actual_samples = min(max_samples, len(combined_dataset))
+                print(f"[INFO] 限制樣本數量：{len(combined_dataset)} → {actual_samples}", flush=True)
+                self.dataset = combined_dataset.select(range(actual_samples))
+            else:
+                self.dataset = combined_dataset
         
         self.to_tensor = T.ToTensor()
 
@@ -555,6 +606,7 @@ def inference_layout_limited(config, max_samples: int = 5):
     generator = torch.Generator(device=device).manual_seed(config.get('seed', 42))
 
     idx = 0
+    actual_samples = len(dataset)  # 獲取實際的樣本數量
     for batch in loader:
         print(f"\n{'='*60}")
         print(f"Processing case {idx} (樣本 {idx+1}/{actual_samples})")
