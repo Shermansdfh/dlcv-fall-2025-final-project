@@ -54,6 +54,51 @@ else:
         print("已取消。")
         raise SystemExit(1)
 
+# Memory optimization: Monkey patch from_pretrained BEFORE loading infer_module
+# This ensures that when infer.py calls from_pretrained, it will use our optimized version
+# This prevents memory doubling (24GB -> 48GB) and enables safetensors memory mapping
+print("[INFO] 應用記憶體優化 patch：bfloat16 + low_cpu_mem_usage + safetensors...", flush=True)
+try:
+    from diffusers import ModelMixin
+    
+    # Store original from_pretrained method (it's already a classmethod)
+    # We need to get the underlying function to properly wrap it
+    original_modelmixin_from_pretrained_func = ModelMixin.from_pretrained.__func__
+    
+    def patched_from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        """Patched from_pretrained that enforces memory optimizations."""
+        # Force torch_dtype=bfloat16 if not specified
+        if 'torch_dtype' not in kwargs:
+            kwargs['torch_dtype'] = torch.bfloat16
+        elif kwargs.get('torch_dtype') != torch.bfloat16:
+            print(f"⚠️  Warning: torch_dtype is {kwargs['torch_dtype']}, forcing bfloat16 for memory efficiency", flush=True)
+            kwargs['torch_dtype'] = torch.bfloat16
+        
+        # Force low_cpu_mem_usage=True
+        if 'low_cpu_mem_usage' not in kwargs:
+            kwargs['low_cpu_mem_usage'] = True
+        elif not kwargs.get('low_cpu_mem_usage'):
+            print("⚠️  Warning: low_cpu_mem_usage=False, forcing True for memory efficiency", flush=True)
+            kwargs['low_cpu_mem_usage'] = True
+        
+        # Prefer safetensors if available (enables memory mapping)
+        if 'use_safetensors' not in kwargs:
+            kwargs['use_safetensors'] = True
+        
+        # Call original method with correct signature
+        return original_modelmixin_from_pretrained_func(cls, pretrained_model_name_or_path, *args, **kwargs)
+    
+    # Apply monkey patch as classmethod
+    ModelMixin.from_pretrained = classmethod(patched_from_pretrained)
+    print("✅ 已應用記憶體優化 patch：torch_dtype=bfloat16, low_cpu_mem_usage=True, use_safetensors=True", flush=True)
+    
+except ImportError as e:
+    print(f"⚠️  Warning: Could not apply memory optimization patches: {e}", flush=True)
+    print("   Model loading may use more memory than necessary.", flush=True)
+except Exception as e:
+    print(f"⚠️  Warning: Error applying memory optimization patches: {e}", flush=True)
+    print("   Proceeding without patches, but memory usage may be high.", flush=True)
+
 # 導入原版 infer.py
 # 注意：infer.py 會設置 CUDA_VISIBLE_DEVICES = "1"
 # 如果系統只有 GPU 0，這會導致問題，所以我們需要修改代碼
@@ -804,43 +849,57 @@ def inference_layout_limited(config, max_samples: int = 5):
         x_hat = (x_hat + 1) / 2
 
         # Remove batch dimension，並立刻搬到 CPU，減少 GPU VRAM 佔用
-        x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3).cpu().to(torch.float32)
+        # 確保所有 tensor 都移到 CPU，避免 GPU VRAM 累積
+        x_hat = x_hat.squeeze(0).permute(1, 0, 2, 3)
+        if x_hat.is_cuda:
+            x_hat = x_hat.cpu()
+        x_hat = x_hat.to(torch.float32)
         
-        # 同樣把 image 搬到 CPU
+        # 同樣把 image 搬到 CPU（確保所有 tensor 都在 CPU）
         if isinstance(image, torch.Tensor):
-            image = image.cpu()
+            if image.is_cuda:
+                image = image.cpu()
         elif isinstance(image, (list, tuple)):
-            image = [img.cpu() if isinstance(img, torch.Tensor) else img for img in image]
+            image = [img.cpu() if isinstance(img, torch.Tensor) and img.is_cuda else img for img in image]
         
-        # latents 之後不再用，直接刪掉並清理 cache
+        # latents 之後不再用，先移到 CPU 再刪掉，確保 GPU 記憶體釋放
+        if isinstance(latents, torch.Tensor) and latents.is_cuda:
+            latents = latents.cpu()
         del latents
+        
+        # 立即清理 GPU cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         
         this_index = f"case_{idx}"
         case_dir = os.path.join(config['save_dir'], this_index)
         os.makedirs(case_dir, exist_ok=True)
         
         # Save whole image_RGBA (X_hat[0]) and background_RGBA (X_hat[1])
-        whole_image_layer = (x_hat[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        # x_hat 已經在 CPU 上，不需要再調用 .cpu()
+        whole_image_layer = (x_hat[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         whole_image_rgba_image = Image.fromarray(whole_image_layer, "RGBA")
         whole_image_rgba_image.save(os.path.join(case_dir, "whole_image_rgba.png"))
+        del whole_image_layer, whole_image_rgba_image  # 立即釋放
 
         adapter_img.save(os.path.join(case_dir, "origin.png"))
 
-        background_layer = (x_hat[1].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        background_layer = (x_hat[1].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         background_rgba_image = Image.fromarray(background_layer, "RGBA")
         background_rgba_image.save(os.path.join(case_dir, "background_rgba.png"))
+        del background_layer, background_rgba_image  # 立即釋放
 
         x_hat = x_hat[2:]
         merged_image = image[1]
         image = image[2:]
 
         # Save transparent VAE decoded results（添加 alpha channel 診斷）
+        # x_hat 已經在 CPU 上，不需要再調用 .cpu()
         print(f"[DEBUG] Saving {x_hat.shape[0]} foreground layers...", flush=True)
         for layer_idx in range(x_hat.shape[0]):
             layer = x_hat[layer_idx]
-            rgba_layer = (layer.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
             
             # Debug: 檢查 alpha channel
             alpha_channel = rgba_layer[:, :, 3]
@@ -864,12 +923,17 @@ def inference_layout_limited(config, max_samples: int = 5):
             
             rgba_image = Image.fromarray(rgba_layer, "RGBA")
             rgba_image.save(os.path.join(case_dir, f"layer_{layer_idx}_rgba.png"))
+            # 立即釋放中間變數
+            del layer, rgba_layer, rgba_image
 
         # Composite background and foreground layers
+        # x_hat 已經在 CPU 上，不需要再調用 .cpu()
         for layer_idx in range(x_hat.shape[0]):
-            rgba_layer = (x_hat[layer_idx].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            rgba_layer = (x_hat[layer_idx].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
             layer_image = Image.fromarray(rgba_layer, "RGBA")
             merged_image = Image.alpha_composite(merged_image.convert('RGBA'), layer_image)
+            # 立即釋放中間變數
+            del rgba_layer, layer_image
         
         # Save final composite images
         merged_image.convert('RGB').save(os.path.join(config['save_dir'], "merged", f"{this_index}.png"))
@@ -881,22 +945,61 @@ def inference_layout_limited(config, max_samples: int = 5):
         idx += 1
 
         # === 每張圖片之後做一次強制清理，盡量釋放 VRAM ===
+        # 確保所有 tensor 變數都被刪除並移到 CPU
         try:
-            # 刪掉本輪大 tensor 變數
+            # 刪掉本輪大 tensor 變數（確保它們在 CPU 上）
+            # x_hat 應該已經在 CPU 上，但為了安全起見再檢查一次
+            if isinstance(x_hat, torch.Tensor) and x_hat.is_cuda:
+                x_hat = x_hat.cpu()
             del x_hat
+        except (NameError, UnboundLocalError):
+            pass
+        
+        try:
+            # image 可能已經在 CPU 上，但檢查並確保
+            if isinstance(image, torch.Tensor) and image.is_cuda:
+                image = image.cpu()
+            elif isinstance(image, (list, tuple)):
+                for img in image:
+                    if isinstance(img, torch.Tensor) and img.is_cuda:
+                        img.cpu()
             del image
+        except (NameError, UnboundLocalError):
+            pass
+        
+        try:
             del merged_image
-        except NameError:
+        except (NameError, UnboundLocalError):
+            pass
+        
+        try:
+            del batch
+        except (NameError, UnboundLocalError):
+            pass
+        
+        try:
+            del layer_boxes
+        except (NameError, UnboundLocalError):
             pass
 
         # Python 垃圾回收
         gc.collect()
 
-        # CUDA 記憶體回收
+        # CUDA 記憶體回收（強制清理）
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # 嘗試重置 peak memory stats（如果可用）
             try:
-                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
+            
+            # 打印記憶體使用情況（用於調試）
+            try:
+                allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+                print(f"   💾 GPU Memory after cleanup: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved", flush=True)
             except Exception:
                 pass
 
