@@ -528,25 +528,6 @@ def main() -> int:
         except ImportError:
             print("⚠️  Could not check Flash Attention 2 availability", flush=True)
         
-        # Check LA-RoPE implementation
-        print("[INFO] Checking LA-RoPE implementation...", flush=True)
-        try:
-            from models.transp_vae import crop_each_layer
-            import inspect
-            rope_source = inspect.getsource(crop_each_layer)
-            
-            # Check if RoPE is computed on-the-fly or cached
-            # In crop_each_layer, RoPE is computed for full H×W then cropped
-            # This is not optimal but acceptable. True on-the-fly would compute only needed region.
-            if 'pos_embedding(' in rope_source and 'reshape(H, W' in rope_source:
-                print("⚠️  LA-RoPE: Currently computes full H×W rotary embeddings then crops", flush=True)
-                print("   💡 Optimization: Could be improved to compute only needed region on-the-fly", flush=True)
-                print("   📝 Location: third_party/cld/models/transp_vae.py:crop_each_layer()", flush=True)
-            else:
-                print("✅ LA-RoPE: Appears to be computed on-the-fly", flush=True)
-        except Exception as e:
-            print(f"⚠️  Could not check LA-RoPE implementation: {e}", flush=True)
-        
         # Enable Tiled VAE decoding if configured
         enable_tiled_vae = config.get('enable_tiled_vae', False)
         enable_sequential_vae = config.get('enable_sequential_vae', True)  # Default enabled for memory efficiency
@@ -567,8 +548,11 @@ def main() -> int:
             def optimized_vae_decode_wrapper(latents, return_dict=True):
                 """
                 Optimized VAE decode wrapper that supports:
-                1. Sequential decoding: decode one layer at a time, move to CPU immediately
+                1. Sequential decoding: decode one layer at a time (keeps results on GPU for pipeline compatibility)
                 2. Tiled decoding: decode large images in tiles to reduce VRAM
+                
+                Note: Results are kept on GPU because pipeline needs GPU tensors for subsequent processing.
+                CPU offloading happens after pipeline returns, in the main inference loop.
                 """
                 # Check if latents have multiple layers (shape: [B*num_layers, C, H, W])
                 if len(latents.shape) == 4:
@@ -696,10 +680,7 @@ def main() -> int:
                                 chunk_decoded = torch.cat(layer_decoded, dim=0)
                                 del layer_decoded
                             
-                            # Move to CPU immediately if sequential decoding
-                            if enable_sequential_vae:
-                                chunk_decoded = chunk_decoded.cpu()
-                            
+                            # Keep on GPU (pipeline needs GPU tensors for subsequent processing)
                             decoded_chunks.append(chunk_decoded)
                             
                             # Clear GPU cache
@@ -707,13 +688,8 @@ def main() -> int:
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
                         
-                        # Concatenate results
-                        if enable_sequential_vae:
-                            # Concatenate on CPU
-                            result = torch.cat(decoded_chunks, dim=0)
-                        else:
-                            # Concatenate on GPU
-                            result = torch.cat(decoded_chunks, dim=0)
+                        # Concatenate results (keep on GPU for pipeline compatibility)
+                        result = torch.cat(decoded_chunks, dim=0)
                         del decoded_chunks
                         
                     elif enable_sequential_vae:
@@ -733,8 +709,8 @@ def main() -> int:
                                     if isinstance(chunk_decoded, tuple):
                                         chunk_decoded = chunk_decoded[0]
                             
-                            # Move to CPU immediately
-                            chunk_decoded = chunk_decoded.cpu()
+                            # Keep on GPU (pipeline needs GPU tensors for subsequent processing)
+                            # CPU offloading happens after pipeline returns
                             decoded_chunks.append(chunk_decoded)
                             
                             # Clear GPU cache
@@ -742,7 +718,7 @@ def main() -> int:
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
                         
-                        # Concatenate on CPU
+                        # Concatenate on GPU (keep on GPU for pipeline compatibility)
                         result = torch.cat(decoded_chunks, dim=0)
                         del decoded_chunks
                     else:
@@ -756,6 +732,13 @@ def main() -> int:
                             if isinstance(result, tuple):
                                 result = result[0]
                     
+                    # Ensure result is a 4D tensor [B, C, H, W] for pipeline compatibility
+                    if len(result.shape) != 4:
+                        print(f"[WARNING] VAE decode result shape is {result.shape}, expected 4D [B, C, H, W]", flush=True)
+                        # Try to add batch dimension if missing
+                        if len(result.shape) == 3:
+                            result = result.unsqueeze(0)
+                    
                     if return_dict:
                         try:
                             from diffusers.models.vae import DecoderOutput
@@ -766,16 +749,26 @@ def main() -> int:
                                 def __init__(self, sample):
                                     self.sample = sample
                             return DecoderOutput(sample=result)
-                    return result
+                    # When return_dict=False, pipeline expects a tuple (result,)
+                    # Pipeline code does: self.vae.decode(...)[0]
+                    return (result,)
                 else:
                     # Fallback to original decode for non-batched latents
-                    return original_vae_decode(latents, return_dict=return_dict)
+                    # Ensure we return tuple when return_dict=False (pipeline expects [0] indexing)
+                    if return_dict:
+                        return original_vae_decode(latents, return_dict=return_dict)
+                    else:
+                        result = original_vae_decode(latents, return_dict=False)
+                        # Ensure it's a tuple (pipeline does [0] indexing)
+                        if isinstance(result, tuple):
+                            return result
+                        return (result,)
             
             # Apply monkey patch to VAE instance
             pipeline.vae.decode = optimized_vae_decode_wrapper
             optimizations = []
             if enable_sequential_vae:
-                optimizations.append("sequential (one layer at a time)")
+                optimizations.append("sequential (one layer at a time, keeps on GPU)")
             if enable_tiled_vae:
                 optimizations.append(f"tiled (tile_size={vae_tile_size})")
             print(f"[INFO] Applied optimized VAE decoding: {', '.join(optimizations)}", flush=True)
