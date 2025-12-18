@@ -547,7 +547,9 @@ def main() -> int:
         
         dataset = PipelineDataset(
             data_dir=data_dir,
-            max_image_side=config.get('max_image_side'),
+            # DISABLED: max_image_side to preserve image quality
+            # max_image_side=config.get('max_image_side'),
+            max_image_side=None,  # Disabled to preserve image quality
             max_image_size=config.get('max_image_size'),
         )
         loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_fn_pipeline)

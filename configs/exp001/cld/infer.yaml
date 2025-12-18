@@ -15,7 +15,9 @@ data_dir: "outputs/pipeline_outputs/cld"
 # IMPORTANT: CLD has a maximum canvas size limit. Set this to ensure
 # final padded size <= 336x336 pixels (21x21 grid units) to avoid tensor dimension errors.
 # Recommended for 16GB GPUs. Set to null to disable.
-max_image_side: 336
+# DISABLED: Commented out to preserve image quality. If tensor dimension errors occur,
+# you may need to re-enable this or fix CLD's internal canvas size constraints.
+# max_image_side: 336
 
 # Model paths
 pretrained_model_name_or_path: "../../checkpoints/flux/FLUX.1-dev"

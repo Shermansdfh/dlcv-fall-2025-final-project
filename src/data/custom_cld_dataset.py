@@ -49,11 +49,14 @@ class PipelineDataset(Dataset):
         Args:
             data_dir: Directory containing JSON files from pipeline_to_cld_infer.py
             max_image_side: If set, downscale images so max(width, height) <= max_image_side.
+                            DISABLED: Commented out to preserve image quality.
             max_image_size: If set to (max_w, max_h) (or [max_w, max_h]), downscale images to fit within it.
         """
         self.data_dir = Path(data_dir)
         self.json_files = sorted(list(self.data_dir.glob("*.json")))
-        self.max_image_side = int(max_image_side) if max_image_side is not None else None
+        # DISABLED: max_image_side to preserve image quality
+        # self.max_image_side = int(max_image_side) if max_image_side is not None else None
+        self.max_image_side = None
 
         if max_image_size is None:
             self.max_image_size: Optional[Tuple[int, int]] = None
@@ -98,8 +101,9 @@ class PipelineDataset(Dataset):
         # Optional downscale to reduce VRAM usage during CLD inference.
         # IMPORTANT: scale layout boxes accordingly.
         scale = 1.0
-        if self.max_image_side is not None and max(W0, H0) > self.max_image_side:
-            scale = min(scale, float(self.max_image_side) / float(max(W0, H0)))
+        # DISABLED: max_image_side scaling to preserve image quality
+        # if self.max_image_side is not None and max(W0, H0) > self.max_image_side:
+        #     scale = min(scale, float(self.max_image_side) / float(max(W0, H0)))
         if self.max_image_size is not None:
             max_w, max_h = self.max_image_size
             if W0 > max_w or H0 > max_h:

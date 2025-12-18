@@ -10,3 +10,9 @@
 [submodule "third_party/cld"]
 	path = third_party/cld
 	url = https://github.com/monkek123King/CLD.git
+[submodule "final-project-challenge-2-shuoisallyouneed"]
+	path = final-project-challenge-2-shuoisallyouneed
+	url = https://github.com/DLCV-Fall-2025/final-project-challenge-2-shuoisallyouneed.git
+[submodule "third_party/submission_and_test"]
+	path = third_party/submission_and_test
+	url = https://github.com/DLCV-Fall-2025/final-project-challenge-2-shuoisallyouneed.git
