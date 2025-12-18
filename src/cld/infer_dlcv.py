@@ -46,13 +46,13 @@ def main() -> int:
         "-c",
         type=str,
         default=None,
-        help="YAML config path（e.g. configs/exp001/cld/infer.yaml）.",
+        help="YAML config path (e.g. configs/exp001/cld/infer.yaml).",
     )
     parser.add_argument(
         "--cld_infer_py",
         type=str,
         default=None,
-        help="third_party CLD's infer.py path（default: <repo_root>/third_party/cld/infer/infer.py）.",
+        help="third_party CLD's infer.py path (default: <repo_root>/third_party/cld/infer/infer.py).",
     )
     args = parser.parse_args()
 
@@ -67,27 +67,10 @@ def main() -> int:
         
         if not cuda_available:
             print("❌ CUDA is not available in this environment")
-            print("   CLD inference requires GPU. Please ensure:")
-            print("   1. GPU is available: nvidia-smi")
-            print("   2. PyTorch with CUDA support is installed")
-            print("   3. CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
-            print("\n   If you're using conda run, try activating the environment directly:")
-            print(f"   conda activate CLD")
-            print(f"   python {Path(__file__).resolve()} --config_path <config>")
             return 1
         
         if cuda_device_count == 0:
             print("❌ CUDA is available but no devices are visible")
-            print("   This can happen when using 'conda run' - CUDA devices may not be accessible.")
-            print("\n   Solutions:")
-            print("   1. Use 'conda activate' instead of 'conda run':")
-            print(f"      conda activate CLD")
-            print(f"      python {Path(__file__).resolve()} --config_path <config>")
-            print("   2. Or ensure CUDA_VISIBLE_DEVICES is set before conda run:")
-            print("      export CUDA_VISIBLE_DEVICES=0")
-            print("      conda run -n CLD python ...")
-            print("   3. Check GPU availability:")
-            print("      nvidia-smi")
             return 1
         
         print(f"✅ CUDA available: {cuda_device_count} device(s)")
@@ -161,7 +144,7 @@ def main() -> int:
         print("   Proceeding without patches, but memory usage may be high.")
 
     # Important: CLD infer.py uses `from models...` / `from tools...`, need to set cwd / sys.path to cld_root
-    # Here we only change cwd to cld_root（same as finals/CLD/infer/infer_dlcv.py）, ensure consistent relative path/resource reading.
+    # Here we only change cwd to cld_root (same as finals/CLD/infer/infer_dlcv.py), ensure consistent relative path/resource reading.
     os.chdir(str(cld_root))
 
     cld_infer = _load_module_from_path("cld_infer", cld_infer_py)
@@ -321,7 +304,6 @@ def main() -> int:
         
         if torch.cuda.is_available() and torch.cuda.device_count() == 0:
             print("\n⚠️  Warning: CUDA is available but no devices are visible.")
-            print("   This may happen with 'conda run' or in Docker containers without GPU access.")
             
             # Try to initialize CUDA by creating a tensor
             try:
@@ -329,18 +311,6 @@ def main() -> int:
                 print("   ✅ CUDA context initialized successfully")
             except RuntimeError as e:
                 print(f"   ❌ Failed to initialize CUDA context: {e}")
-                print("\n   Solutions:")
-                print("   1. In Docker: Ensure GPU is properly mounted:")
-                print("      docker run --gpus all ...")
-                print("      # or with nvidia-docker:")
-                print("      docker run --runtime=nvidia ...")
-                print("   2. Check GPU availability:")
-                print("      nvidia-smi")
-                print("   3. Set CUDA_VISIBLE_DEVICES before running:")
-                print("      export CUDA_VISIBLE_DEVICES=0")
-                print("   4. Use 'conda activate' instead of 'conda run':")
-                print("      conda activate CLD")
-                print(f"      python {Path(__file__).resolve()} --config_path <config>")
                 return 1
             
             # Monkey patch torch.load to handle device_count() == 0 case AND memory optimization
@@ -673,7 +643,6 @@ def main() -> int:
             image = image[2:]
 
             # Save transparent VAE decoded results
-            # Note: transparent VAE should already generate proper RGBA with alpha channel
             # x_hat[2:] corresponds to foreground layers (after whole_image and background)
             print(f"[DEBUG] Saving {x_hat.shape[0]} foreground layers...", flush=True)
             for layer_idx in range(x_hat.shape[0]):
@@ -743,9 +712,6 @@ def main() -> int:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
-    # Always use our custom inference_layout that uses PipelineDataset
-    # This avoids downloading HuggingFace datasets
-    print("✅ Using custom inference_layout with PipelineDataset (no HuggingFace download)")
     inference_layout_pipeline(config)
     return 0
 

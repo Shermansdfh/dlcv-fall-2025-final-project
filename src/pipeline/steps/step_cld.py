@@ -80,18 +80,10 @@ def run_step4_cld(
         cuda_available = torch.cuda.is_available()
         if not cuda_available:
             print("⚠️  Warning: CUDA not available in current environment")
-            print("   CLD inference requires GPU. Please ensure:")
-            print("   1. GPU is available and drivers are installed")
-            print("   2. PyTorch with CUDA support is installed in the CLD conda environment")
-            print("   3. CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
     except ImportError:
         # torch not available in current environment, but that's OK
         # The CLD conda environment should have torch installed
         pass
-    
-    # Use conda activate instead of conda run for CLD inference
-    # This is necessary because conda run has issues with CUDA device visibility
-    # We'll use bash -c to execute conda activate in a shell
     
     # Find conda initialization script (common locations)
     conda_init_paths = [
@@ -141,15 +133,6 @@ def run_step4_cld(
         return 0
     except subprocess.CalledProcessError as e:
         print(f"\n❌ Step 4 (CLD Inference) failed with exit code {e.returncode}")
-        print("\n💡 Troubleshooting tips:")
-        print("   1. Verify GPU is available: nvidia-smi")
-        print("   2. Check CUDA in CLD environment:")
-        print(f"      conda activate {conda_env}")
-        print(f"      python -c \"import torch; print(f'CUDA available: {{torch.cuda.is_available()}}, Devices: {{torch.cuda.device_count()}}')\"")
-        print("   3. Ensure CUDA_VISIBLE_DEVICES is set correctly (if using specific GPU)")
-        print("   4. Check that PyTorch with CUDA support is installed in CLD environment")
-        print("   5. If conda.sh not found, ensure conda is properly initialized:")
-        print("      source ~/.bashrc  # or source /opt/anaconda3/etc/profile.d/conda.sh")
         return e.returncode
     except FileNotFoundError:
         print(f"\n❌ Conda not found. Please ensure conda is installed and in PATH")
