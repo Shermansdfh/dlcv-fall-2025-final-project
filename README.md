@@ -2,6 +2,15 @@
 
 本專案實現了一個完整的圖像層級分解 Pipeline，從物件偵測到最終的分層合成。
 
+## 重要連結
+- [CLD Repo](https://github.com/monkek123King/CLD/?tab=readme-ov-file)
+- [CLD hugging face](https://huggingface.co/thuteam/CLD)
+- [LayerD Repo](https://github.com/CyberAgentAILab/LayerD)
+- [RTDETR](https://github.com/ultralytics/ultralytics)
+- [LLaVA](https://github.com/haotian-liu/LLaVA?tab=readme-ov-file#llava-weights)
+- [Crello Dataset](https://huggingface.co/datasets/cyberagent/crello)
+- [TA Dataset](https://huggingface.co/datasets/WalkerHsu/DLCV2025_final_project_piccollage)
+
 ## 📋 目錄
 
 - [專案簡介](#專案簡介)
