@@ -552,7 +552,7 @@ def main() -> int:
             max_image_side=None,  # Disabled to preserve image quality
             max_image_size=config.get('max_image_size'),
         )
-        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_fn_pipeline)
+        loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0, collate_fn=collate_fn_pipeline)
 
         generator = torch.Generator(device=torch.device("cuda")).manual_seed(config.get('seed', 42))
 
