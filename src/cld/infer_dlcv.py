@@ -725,8 +725,13 @@ def main() -> int:
                             chunk = latents[i:i+chunk_size]
                             with torch.no_grad():
                                 chunk_decoded = original_vae_decode(chunk, return_dict=return_dict)
+                                # Handle both return_dict=True (DecoderOutput) and return_dict=False (tuple) cases
                                 if return_dict:
                                     chunk_decoded = chunk_decoded.sample
+                                else:
+                                    # When return_dict=False, VAE decode returns a tuple, take first element
+                                    if isinstance(chunk_decoded, tuple):
+                                        chunk_decoded = chunk_decoded[0]
                             
                             # Move to CPU immediately
                             chunk_decoded = chunk_decoded.cpu()
@@ -743,8 +748,13 @@ def main() -> int:
                     else:
                         # No optimization: use original decode
                         result = original_vae_decode(latents, return_dict=return_dict)
+                        # Handle both return_dict=True (DecoderOutput) and return_dict=False (tuple) cases
                         if return_dict:
                             result = result.sample
+                        else:
+                            # When return_dict=False, VAE decode returns a tuple, take first element
+                            if isinstance(result, tuple):
+                                result = result[0]
                     
                     if return_dict:
                         try:
