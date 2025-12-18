@@ -466,6 +466,72 @@ def main() -> int:
     from PIL import Image
     from torch.utils.data import DataLoader
     
+    # Helper function for Tiled VAE decoding
+    def tiled_vae_decode(vae, latents, tile_size=512, overlap=64):
+        """
+        Decode VAE latents using tiled approach to reduce VRAM usage.
+        
+        Args:
+            vae: VAE model
+            latents: Input latents tensor [B, C, H, W]
+            tile_size: Size of each tile
+            overlap: Overlap between tiles to avoid boundary artifacts
+        
+        Returns:
+            Decoded image tensor
+        """
+        B, C, H, W = latents.shape
+        # Calculate number of tiles
+        num_tiles_h = (H + tile_size - 1) // tile_size
+        num_tiles_w = (W + tile_size - 1) // tile_size
+        
+        decoded_tiles = []
+        for i in range(num_tiles_h):
+            row_tiles = []
+            for j in range(num_tiles_w):
+                # Calculate tile boundaries with overlap
+                h_start = max(0, i * tile_size - overlap)
+                h_end = min(H, (i + 1) * tile_size + overlap)
+                w_start = max(0, j * tile_size - overlap)
+                w_end = min(W, (j + 1) * tile_size + overlap)
+                
+                # Extract tile
+                tile_latents = latents[:, :, h_start:h_end, w_start:w_end]
+                
+                # Decode tile
+                with torch.no_grad():
+                    tile_image = vae.decode(tile_latents, return_dict=False)[0]
+                
+                # Remove overlap (except for first tile in each dimension)
+                if i > 0:
+                    tile_image = tile_image[:, :, overlap * 8:, :]  # *8 because VAE upsamples by 8x
+                if j > 0:
+                    tile_image = tile_image[:, :, :, overlap * 8:]
+                if i < num_tiles_h - 1 and h_end < H:
+                    remaining_h = (h_end - h_start) * 8 - tile_image.shape[2]
+                    if remaining_h > 0:
+                        tile_image = tile_image[:, :, :-remaining_h, :]
+                if j < num_tiles_w - 1 and w_end < W:
+                    remaining_w = (w_end - w_start) * 8 - tile_image.shape[3]
+                    if remaining_w > 0:
+                        tile_image = tile_image[:, :, :, :-remaining_w]
+                
+                row_tiles.append(tile_image)
+                # Clear tile from GPU immediately
+                del tile_latents
+                torch.cuda.empty_cache()
+            
+            # Concatenate row tiles
+            row_image = torch.cat(row_tiles, dim=3)
+            decoded_tiles.append(row_image)
+            del row_tiles
+            torch.cuda.empty_cache()
+        
+        # Concatenate all rows
+        full_image = torch.cat(decoded_tiles, dim=2)
+        del decoded_tiles
+        return full_image
+    
     # Implement our own inference_layout that uses PipelineDataset
     # This avoids calling cld_infer.inference_layout which would use LayoutTrainDataset
     # and download the entire HuggingFace dataset
@@ -505,6 +571,116 @@ def main() -> int:
         print("[DEBUG] About to call initialize_pipeline (LoRA optimization should be active)...", flush=True)
         pipeline = initialize_pipeline(config)
         print("[DEBUG] initialize_pipeline completed", flush=True)
+        
+        # Enable Flash Attention 2 if available
+        print("[INFO] Checking for Flash Attention 2 support...", flush=True)
+        try:
+            from diffusers.utils import is_flash_attention_available
+            if is_flash_attention_available():
+                print("✅ Flash Attention 2 is available", flush=True)
+                # Try to enable Flash Attention 2 for transformer
+                try:
+                    # Check if transformer has attention processors
+                    if hasattr(pipeline.transformer, 'set_attn_processor'):
+                        from diffusers.models.attention_processor import AttnProcessor2_0
+                        # Use AttnProcessor2_0 which uses Flash Attention when available
+                        pipeline.transformer.set_attn_processor(AttnProcessor2_0())
+                        print("✅ Enabled Flash Attention 2 for transformer", flush=True)
+                    else:
+                        print("⚠️  Transformer does not support set_attn_processor", flush=True)
+                except Exception as e:
+                    print(f"⚠️  Could not enable Flash Attention 2: {e}", flush=True)
+            else:
+                print("⚠️  Flash Attention 2 is not available (install flash-attn package)", flush=True)
+        except ImportError:
+            print("⚠️  Could not check Flash Attention 2 availability", flush=True)
+        
+        # Check LA-RoPE implementation
+        print("[INFO] Checking LA-RoPE implementation...", flush=True)
+        try:
+            from models.transp_vae import crop_each_layer
+            import inspect
+            rope_source = inspect.getsource(crop_each_layer)
+            
+            # Check if RoPE is computed on-the-fly or cached
+            # In crop_each_layer, RoPE is computed for full H×W then cropped
+            # This is not optimal but acceptable. True on-the-fly would compute only needed region.
+            if 'pos_embedding(' in rope_source and 'reshape(H, W' in rope_source:
+                print("⚠️  LA-RoPE: Currently computes full H×W rotary embeddings then crops", flush=True)
+                print("   💡 Optimization: Could be improved to compute only needed region on-the-fly", flush=True)
+                print("   📝 Location: third_party/cld/models/transp_vae.py:crop_each_layer()", flush=True)
+            else:
+                print("✅ LA-RoPE: Appears to be computed on-the-fly", flush=True)
+        except Exception as e:
+            print(f"⚠️  Could not check LA-RoPE implementation: {e}", flush=True)
+        
+        # Enable Tiled VAE decoding if configured
+        enable_tiled_vae = config.get('enable_tiled_vae', False)
+        enable_sequential_vae = config.get('enable_sequential_vae', True)  # Default enabled for memory efficiency
+        vae_tile_size = config.get('vae_tile_size', 512)  # Default tile size
+        
+        if enable_tiled_vae:
+            print(f"[INFO] Tiled VAE decoding enabled (tile_size={vae_tile_size})", flush=True)
+        if enable_sequential_vae:
+            print("[INFO] Sequential VAE decoding enabled (one layer at a time)", flush=True)
+        
+        # Monkey patch pipeline's VAE decode for sequential decoding
+        # Note: Pipeline already splits latents into segments (line 791 in pipeline.py)
+        # We'll optimize the segment processing to decode one at a time
+        if enable_sequential_vae and hasattr(pipeline, 'vae'):
+            # Store original decode method
+            original_vae_decode = pipeline.vae.decode
+            
+            def sequential_vae_decode_wrapper(latents, return_dict=True):
+                """
+                Sequential VAE decode wrapper: decode one segment at a time and move to CPU immediately.
+                This reduces VRAM usage significantly for multi-layer generation.
+                """
+                # Check if latents have multiple layers (shape: [B*num_layers, C, H, W])
+                if len(latents.shape) == 4:
+                    B, C, H, W = latents.shape
+                    # Decode in smaller chunks (one layer at a time)
+                    chunk_size = 1  # Decode one layer at a time
+                    decoded_chunks = []
+                    
+                    for i in range(0, B, chunk_size):
+                        chunk = latents[i:i+chunk_size]
+                        with torch.no_grad():
+                            chunk_decoded = original_vae_decode(chunk, return_dict=return_dict)
+                            if return_dict:
+                                chunk_decoded = chunk_decoded.sample
+                        
+                        # Move to CPU immediately
+                        chunk_decoded = chunk_decoded.cpu()
+                        decoded_chunks.append(chunk_decoded)
+                        
+                        # Clear GPU cache
+                        del chunk
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    
+                    # Concatenate on CPU
+                    result = torch.cat(decoded_chunks, dim=0)
+                    del decoded_chunks
+                    
+                    if return_dict:
+                        try:
+                            from diffusers.models.vae import DecoderOutput
+                            return DecoderOutput(sample=result)
+                        except ImportError:
+                            # Fallback if DecoderOutput not available
+                            class DecoderOutput:
+                                def __init__(self, sample):
+                                    self.sample = sample
+                            return DecoderOutput(sample=result)
+                    return result
+                else:
+                    # Fallback to original decode for non-batched latents
+                    return original_vae_decode(latents, return_dict=return_dict)
+            
+            # Apply monkey patch to VAE instance
+            pipeline.vae.decode = sequential_vae_decode_wrapper
+            print("[INFO] Applied sequential VAE decoding patch (decodes one layer at a time)", flush=True)
 
         # Use PipelineDataset instead of LayoutTrainDataset
         print("[INFO] Loading dataset using PipelineDataset (no HuggingFace download)...", flush=True)
