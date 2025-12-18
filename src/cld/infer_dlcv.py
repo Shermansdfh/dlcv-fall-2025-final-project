@@ -516,14 +516,24 @@ def main() -> int:
         # Enable Tiled VAE decoding if configured
         enable_tiled_vae = config.get('enable_tiled_vae', False)
         vae_tile_size = config.get('vae_tile_size', 512)  # Default tile size
-        
+
         if enable_tiled_vae:
             print(f"[INFO] Tiled VAE decoding enabled (tile_size={vae_tile_size})", flush=True)
-        
-        # Monkey patch pipeline's VAE decode for tiled decoding
+            # Try to use the built-in enable_tiling method first
+            if hasattr(pipeline.vae, 'enable_tiling'):
+                try:
+                    pipeline.vae.enable_tiling()
+                    print(f"[INFO] Used built-in VAE tiling with tile size {vae_tile_size}", flush=True)
+                except Exception as e:
+                    print(f"[WARNING] Built-in VAE tiling failed: {e}, falling back to custom implementation", flush=True)
+                    enable_tiled_vae = True  # Keep flag for custom implementation
+            else:
+                print("[INFO] VAE does not have built-in tiling, using custom implementation", flush=True)
+
+        # Monkey patch pipeline's VAE decode for custom tiled decoding if needed
         # Note: Pipeline already splits latents into segments (line 791 in pipeline.py)
         # We'll optimize the segment processing to use tiled decoding
-        if enable_tiled_vae and hasattr(pipeline, 'vae'):
+        if enable_tiled_vae and hasattr(pipeline, 'vae') and not hasattr(pipeline.vae, 'enable_tiling'):
             # Store original decode method
             original_vae_decode = pipeline.vae.decode
             
