@@ -505,24 +505,13 @@ def main() -> int:
         pipeline = initialize_pipeline(config)
         print("[DEBUG] initialize_pipeline completed", flush=True)
         
-        # Enable Flash Attention 2 if available
-        print("[INFO] Checking for Flash Attention 2 support...", flush=True)
-        try:
-            # Try to import AttnProcessor2_0 directly - if it works, Flash Attention 2 is available
-            from diffusers.models.attention_processor import AttnProcessor2_0
-            
-            # Check if transformer has attention processors
-            if hasattr(pipeline.transformer, 'set_attn_processor'):
-                # Use AttnProcessor2_0 which uses Flash Attention when available
-                pipeline.transformer.set_attn_processor(AttnProcessor2_0())
-                print("✅ Flash Attention 2 is available and enabled for transformer", flush=True)
-            else:
-                print("⚠️  Transformer does not support set_attn_processor", flush=True)
-        except ImportError as e:
-            print(f"⚠️  Flash Attention 2 is not available: {e}", flush=True)
-            print("💡 Install flash-attn package to enable Flash Attention 2: pip install flash-attn --no-build-isolation", flush=True)
-        except Exception as e:
-            print(f"⚠️  Could not enable Flash Attention 2: {e}", flush=True)
+        # Note: Flash Attention 2 is not compatible with CLD's custom transformer
+        # CLD's transformer requires:
+        # 1. image_rotary_emb parameter in cross_attention_kwargs
+        # 2. Attention to return two values (attn_output, context_attn_output)
+        # AttnProcessor2_0 does not support these requirements
+        # Therefore, we skip Flash Attention 2 and use the default attention processor
+        print("[INFO] Using default attention processor (Flash Attention 2 not compatible with CLD transformer)", flush=True)
         
         # Enable Tiled VAE decoding if configured
         enable_tiled_vae = config.get('enable_tiled_vae', False)

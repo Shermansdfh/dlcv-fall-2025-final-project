@@ -38,6 +38,6 @@ cfg: 4.0  # Guidance scale
 skip_fuse_lora: false  # Set to false to enable fuse_lora (faster inference, uses more VRAM)
 
 # VRAM Optimization Parameters
-enable_tiled_vae: false  # Enable tiled VAE decoding to reduce VRAM (slower but uses less memory)
+enable_tiled_vae: true  # Enable tiled VAE decoding to reduce VRAM (slower but uses less memory)
 vae_tile_size: 512  # Tile size for tiled VAE decoding (only used if enable_tiled_vae=true)
 
