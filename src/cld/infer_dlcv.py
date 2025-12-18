@@ -464,52 +464,7 @@ def main() -> int:
     except ImportError:
         print("[DEBUG] Could not patch fuse_lora/unload_lora (models.mmdit not available)", flush=True)
     
-    # Option to skip fuse_lora to save memory (LoRA will still work via PEFT mechanism)
-    # Check config for skip_fuse_lora flag
-    config = cld_infer.load_config(str(config_path))
-    skip_fuse_lora = config.get('skip_fuse_lora', False)
-    
-    if skip_fuse_lora:
-        print("⚠️  skip_fuse_lora=True: Will skip fuse_lora() to save memory", flush=True)
-        print("   LoRA will work via PEFT mechanism (slight performance loss <5%, but saves memory)", flush=True)
-        
-        # Monkey patch fuse_lora and unload_lora to be no-ops
-        if CustomFluxPipeline is not None:
-            try:
-                from models.mmdit import CustomFluxTransformer2DModel
-                from models.multiLayer_adapter import MultiLayerAdapter
-                
-                # Patch fuse_lora to be a no-op
-                if hasattr(CustomFluxTransformer2DModel, 'fuse_lora'):
-                    def noop_fuse_lora(self, *args, **kwargs):
-                        print("[INFO] Skipping fuse_lora() to save memory (LoRA will work via PEFT)", flush=True)
-                        return None
-                    CustomFluxTransformer2DModel.fuse_lora = noop_fuse_lora
-                
-                if hasattr(MultiLayerAdapter, 'fuse_lora'):
-                    def noop_fuse_lora_adapter(self, *args, **kwargs):
-                        print("[INFO] Skipping MultiLayerAdapter.fuse_lora() to save memory", flush=True)
-                        return None
-                    MultiLayerAdapter.fuse_lora = noop_fuse_lora_adapter
-                
-                # Patch unload_lora to be a no-op (since we didn't fuse, we shouldn't unload)
-                if hasattr(CustomFluxTransformer2DModel, 'unload_lora'):
-                    def noop_unload_lora(self, *args, **kwargs):
-                        print("[INFO] Skipping unload_lora() (LoRA weights kept for PEFT inference)", flush=True)
-                        return None
-                    CustomFluxTransformer2DModel.unload_lora = noop_unload_lora
-                
-                if hasattr(MultiLayerAdapter, 'unload_lora'):
-                    def noop_unload_lora_adapter(self, *args, **kwargs):
-                        print("[INFO] Skipping MultiLayerAdapter.unload_lora()", flush=True)
-                        return None
-                    MultiLayerAdapter.unload_lora = noop_unload_lora_adapter
-                
-                print("✅ Patched fuse_lora/unload_lora to skip (memory optimization)", flush=True)
-            except ImportError:
-                print("⚠️  Warning: Could not patch fuse_lora/unload_lora (models not available)", flush=True)
-    
-    # Reload config (we already loaded it above, but this ensures consistency)
+    # Load config
     config = cld_infer.load_config(str(config_path))
     
     def initialize_pipeline_with_timing(config):
@@ -644,27 +599,7 @@ def main() -> int:
             adapter_img = batch["whole_img"][0]
             caption = batch["caption"][0]
             
-            # Debug: Check layout before quantization
-            raw_layout = batch["layout"][0]
-            print(f"\n[DEBUG] Case {idx}: Layout validation", flush=True)
-            print(f"  Image size: {width}x{height}", flush=True)
-            print(f"  Raw layout count: {len(raw_layout)}", flush=True)
-            print(f"  Raw layout[0] (should be full image): {raw_layout[0] if len(raw_layout) > 0 else 'N/A'}", flush=True)
-            if len(raw_layout) > 1:
-                print(f"  Raw layout[1] (background): {raw_layout[1]}", flush=True)
-            if len(raw_layout) > 2:
-                print(f"  Raw layout[2:] (foreground): {raw_layout[2:]}", flush=True)
-            
             layer_boxes = get_input_box(batch["layout"][0])
-            
-            # Debug: Check quantized layer_boxes
-            print(f"  Quantized layer_boxes count: {len(layer_boxes)}", flush=True)
-            print(f"  layer_boxes[0] (whole_image): {layer_boxes[0] if len(layer_boxes) > 0 else 'N/A'}", flush=True)
-            if len(layer_boxes) > 1:
-                print(f"  layer_boxes[1] (background): {layer_boxes[1]}", flush=True)
-            if len(layer_boxes) > 2:
-                print(f"  layer_boxes[2:] (foreground): {layer_boxes[2:]}", flush=True)
-            print(f"  num_layers to pass: {len(layer_boxes)}", flush=True)
             
             # Clear batch from memory before pipeline call
             del batch
@@ -745,25 +680,7 @@ def main() -> int:
                 layer = x_hat[layer_idx]  # Already on CPU, shape: [4, H, W] (RGBA)
                 rgba_layer = (layer.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
                 
-                # Debug: Check alpha channel statistics for this layer
-                alpha_channel = rgba_layer[:, :, 3]
-                alpha_min, alpha_max = alpha_channel.min(), alpha_channel.max()
-                alpha_mean = alpha_channel.mean()
-                transparent_pixels = (alpha_channel == 0).sum()
-                total_pixels = alpha_channel.size
-                transparent_ratio = transparent_pixels / total_pixels * 100
                 
-                # Get corresponding box for this layer
-                if layer_idx < len(layer_boxes) - 2:  # -2 because we skip whole_image and background
-                    corresponding_box = layer_boxes[layer_idx + 2]  # +2 because layer_boxes[0] and [1] are whole_image and background
-                    x1, y1, x2, y2 = corresponding_box
-                    box_area = (x2 - x1) * (y2 - y1)
-                    print(f"  Layer {layer_idx}: box={corresponding_box}, box_area={box_area}, "
-                          f"alpha_range=[{alpha_min}, {alpha_max}], alpha_mean={alpha_mean:.1f}, "
-                          f"transparent={transparent_ratio:.1f}%", flush=True)
-                else:
-                    print(f"  Layer {layer_idx}: alpha_range=[{alpha_min}, {alpha_max}], alpha_mean={alpha_mean:.1f}, "
-                          f"transparent={transparent_ratio:.1f}%", flush=True)
                 
                 # Pillow can auto-detect RGBA format from shape [H, W, 4]
                 rgba_image = Image.fromarray(rgba_layer, mode='RGBA')
