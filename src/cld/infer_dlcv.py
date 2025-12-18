@@ -465,73 +465,6 @@ def main() -> int:
     import numpy as np
     from PIL import Image
     from torch.utils.data import DataLoader
-    
-    # Helper function for Tiled VAE decoding
-    def tiled_vae_decode(vae, latents, tile_size=512, overlap=64):
-        """
-        Decode VAE latents using tiled approach to reduce VRAM usage.
-        
-        Args:
-            vae: VAE model
-            latents: Input latents tensor [B, C, H, W]
-            tile_size: Size of each tile
-            overlap: Overlap between tiles to avoid boundary artifacts
-        
-        Returns:
-            Decoded image tensor
-        """
-        B, C, H, W = latents.shape
-        # Calculate number of tiles
-        num_tiles_h = (H + tile_size - 1) // tile_size
-        num_tiles_w = (W + tile_size - 1) // tile_size
-        
-        decoded_tiles = []
-        for i in range(num_tiles_h):
-            row_tiles = []
-            for j in range(num_tiles_w):
-                # Calculate tile boundaries with overlap
-                h_start = max(0, i * tile_size - overlap)
-                h_end = min(H, (i + 1) * tile_size + overlap)
-                w_start = max(0, j * tile_size - overlap)
-                w_end = min(W, (j + 1) * tile_size + overlap)
-                
-                # Extract tile
-                tile_latents = latents[:, :, h_start:h_end, w_start:w_end]
-                
-                # Decode tile
-                with torch.no_grad():
-                    tile_image = vae.decode(tile_latents, return_dict=False)[0]
-                
-                # Remove overlap (except for first tile in each dimension)
-                if i > 0:
-                    tile_image = tile_image[:, :, overlap * 8:, :]  # *8 because VAE upsamples by 8x
-                if j > 0:
-                    tile_image = tile_image[:, :, :, overlap * 8:]
-                if i < num_tiles_h - 1 and h_end < H:
-                    remaining_h = (h_end - h_start) * 8 - tile_image.shape[2]
-                    if remaining_h > 0:
-                        tile_image = tile_image[:, :, :-remaining_h, :]
-                if j < num_tiles_w - 1 and w_end < W:
-                    remaining_w = (w_end - w_start) * 8 - tile_image.shape[3]
-                    if remaining_w > 0:
-                        tile_image = tile_image[:, :, :, :-remaining_w]
-                
-                row_tiles.append(tile_image)
-                # Clear tile from GPU immediately
-                del tile_latents
-                torch.cuda.empty_cache()
-            
-            # Concatenate row tiles
-            row_image = torch.cat(row_tiles, dim=3)
-            decoded_tiles.append(row_image)
-            del row_tiles
-            torch.cuda.empty_cache()
-        
-        # Concatenate all rows
-        full_image = torch.cat(decoded_tiles, dim=2)
-        del decoded_tiles
-        return full_image
-    
     # Implement our own inference_layout that uses PipelineDataset
     # This avoids calling cld_infer.inference_layout which would use LayoutTrainDataset
     # and download the entire HuggingFace dataset
@@ -624,44 +557,194 @@ def main() -> int:
         if enable_sequential_vae:
             print("[INFO] Sequential VAE decoding enabled (one layer at a time)", flush=True)
         
-        # Monkey patch pipeline's VAE decode for sequential decoding
+        # Monkey patch pipeline's VAE decode for sequential and/or tiled decoding
         # Note: Pipeline already splits latents into segments (line 791 in pipeline.py)
-        # We'll optimize the segment processing to decode one at a time
-        if enable_sequential_vae and hasattr(pipeline, 'vae'):
+        # We'll optimize the segment processing to decode one at a time and/or use tiled decoding
+        if (enable_sequential_vae or enable_tiled_vae) and hasattr(pipeline, 'vae'):
             # Store original decode method
             original_vae_decode = pipeline.vae.decode
             
-            def sequential_vae_decode_wrapper(latents, return_dict=True):
+            def optimized_vae_decode_wrapper(latents, return_dict=True):
                 """
-                Sequential VAE decode wrapper: decode one segment at a time and move to CPU immediately.
-                This reduces VRAM usage significantly for multi-layer generation.
+                Optimized VAE decode wrapper that supports:
+                1. Sequential decoding: decode one layer at a time, move to CPU immediately
+                2. Tiled decoding: decode large images in tiles to reduce VRAM
                 """
                 # Check if latents have multiple layers (shape: [B*num_layers, C, H, W])
                 if len(latents.shape) == 4:
                     B, C, H, W = latents.shape
-                    # Decode in smaller chunks (one layer at a time)
-                    chunk_size = 1  # Decode one layer at a time
-                    decoded_chunks = []
                     
-                    for i in range(0, B, chunk_size):
-                        chunk = latents[i:i+chunk_size]
-                        with torch.no_grad():
-                            chunk_decoded = original_vae_decode(chunk, return_dict=return_dict)
-                            if return_dict:
-                                chunk_decoded = chunk_decoded.sample
-                        
-                        # Move to CPU immediately
-                        chunk_decoded = chunk_decoded.cpu()
-                        decoded_chunks.append(chunk_decoded)
-                        
-                        # Clear GPU cache
-                        del chunk
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                    # Check if tiled decoding should be used
+                    # If enable_tiled_vae is True, always use tiled decoding (regardless of image size)
+                    # This helps reduce VRAM usage even for smaller images
+                    use_tiled = enable_tiled_vae
                     
-                    # Concatenate on CPU
-                    result = torch.cat(decoded_chunks, dim=0)
-                    del decoded_chunks
+                    if use_tiled:
+                        # Use tiled decoding for large images
+                        decoded_chunks = []
+                        chunk_size = 1 if enable_sequential_vae else B  # Sequential: 1 at a time, otherwise decode all
+                        
+                        for i in range(0, B, chunk_size):
+                            chunk = latents[i:i+chunk_size]
+                            
+                            # Decode this chunk using tiled approach
+                            # Define tiled decode helper inline to access pipeline.vae
+                            def decode_tile(tile_latents):
+                                """Helper to decode a single tile"""
+                                return original_vae_decode(tile_latents, return_dict=False)[0]
+                            
+                            if chunk_size == 1:
+                                # Single layer: use tiled decode
+                                B_tile, C_tile, H_tile, W_tile = chunk.shape
+                                num_tiles_h = (H_tile + vae_tile_size - 1) // vae_tile_size
+                                num_tiles_w = (W_tile + vae_tile_size - 1) // vae_tile_size
+                                overlap = 64
+                                
+                                decoded_tiles = []
+                                for i in range(num_tiles_h):
+                                    row_tiles = []
+                                    for j in range(num_tiles_w):
+                                        h_start = max(0, i * vae_tile_size - overlap)
+                                        h_end = min(H_tile, (i + 1) * vae_tile_size + overlap)
+                                        w_start = max(0, j * vae_tile_size - overlap)
+                                        w_end = min(W_tile, (j + 1) * vae_tile_size + overlap)
+                                        
+                                        tile_latents = chunk[:, :, h_start:h_end, w_start:w_end]
+                                        tile_image = decode_tile(tile_latents)
+                                        
+                                        # Remove overlap
+                                        if i > 0:
+                                            tile_image = tile_image[:, :, overlap * 8:, :]
+                                        if j > 0:
+                                            tile_image = tile_image[:, :, :, overlap * 8:]
+                                        if i < num_tiles_h - 1 and h_end < H_tile:
+                                            remaining_h = (h_end - h_start) * 8 - tile_image.shape[2]
+                                            if remaining_h > 0:
+                                                tile_image = tile_image[:, :, :-remaining_h, :]
+                                        if j < num_tiles_w - 1 and w_end < W_tile:
+                                            remaining_w = (w_end - w_start) * 8 - tile_image.shape[3]
+                                            if remaining_w > 0:
+                                                tile_image = tile_image[:, :, :, :-remaining_w]
+                                        
+                                        row_tiles.append(tile_image)
+                                        del tile_latents
+                                        if torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                                    
+                                    row_image = torch.cat(row_tiles, dim=3)
+                                    decoded_tiles.append(row_image)
+                                    del row_tiles
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                
+                                chunk_decoded = torch.cat(decoded_tiles, dim=2)
+                                del decoded_tiles
+                            else:
+                                # Multiple layers: decode each layer with tiled approach
+                                layer_decoded = []
+                                for layer_idx in range(chunk.shape[0]):
+                                    layer_latent = chunk[layer_idx:layer_idx+1]
+                                    # Use same tiled approach for each layer
+                                    B_layer, C_layer, H_layer, W_layer = layer_latent.shape
+                                    num_tiles_h = (H_layer + vae_tile_size - 1) // vae_tile_size
+                                    num_tiles_w = (W_layer + vae_tile_size - 1) // vae_tile_size
+                                    overlap = 64
+                                    
+                                    decoded_tiles = []
+                                    for i in range(num_tiles_h):
+                                        row_tiles = []
+                                        for j in range(num_tiles_w):
+                                            h_start = max(0, i * vae_tile_size - overlap)
+                                            h_end = min(H_layer, (i + 1) * vae_tile_size + overlap)
+                                            w_start = max(0, j * vae_tile_size - overlap)
+                                            w_end = min(W_layer, (j + 1) * vae_tile_size + overlap)
+                                            
+                                            tile_latents = layer_latent[:, :, h_start:h_end, w_start:w_end]
+                                            tile_image = decode_tile(tile_latents)
+                                            
+                                            # Remove overlap
+                                            if i > 0:
+                                                tile_image = tile_image[:, :, overlap * 8:, :]
+                                            if j > 0:
+                                                tile_image = tile_image[:, :, :, overlap * 8:]
+                                            if i < num_tiles_h - 1 and h_end < H_layer:
+                                                remaining_h = (h_end - h_start) * 8 - tile_image.shape[2]
+                                                if remaining_h > 0:
+                                                    tile_image = tile_image[:, :, :-remaining_h, :]
+                                            if j < num_tiles_w - 1 and w_end < W_layer:
+                                                remaining_w = (w_end - w_start) * 8 - tile_image.shape[3]
+                                                if remaining_w > 0:
+                                                    tile_image = tile_image[:, :, :, :-remaining_w]
+                                            
+                                            row_tiles.append(tile_image)
+                                            del tile_latents
+                                            if torch.cuda.is_available():
+                                                torch.cuda.empty_cache()
+                                        
+                                        row_image = torch.cat(row_tiles, dim=3)
+                                        decoded_tiles.append(row_image)
+                                        del row_tiles
+                                        if torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+                                    
+                                    layer_image = torch.cat(decoded_tiles, dim=2)
+                                    layer_decoded.append(layer_image)
+                                    del layer_latent, decoded_tiles
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                
+                                chunk_decoded = torch.cat(layer_decoded, dim=0)
+                                del layer_decoded
+                            
+                            # Move to CPU immediately if sequential decoding
+                            if enable_sequential_vae:
+                                chunk_decoded = chunk_decoded.cpu()
+                            
+                            decoded_chunks.append(chunk_decoded)
+                            
+                            # Clear GPU cache
+                            del chunk
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        
+                        # Concatenate results
+                        if enable_sequential_vae:
+                            # Concatenate on CPU
+                            result = torch.cat(decoded_chunks, dim=0)
+                        else:
+                            # Concatenate on GPU
+                            result = torch.cat(decoded_chunks, dim=0)
+                        del decoded_chunks
+                        
+                    elif enable_sequential_vae:
+                        # Use sequential decoding (one layer at a time)
+                        chunk_size = 1
+                        decoded_chunks = []
+                        
+                        for i in range(0, B, chunk_size):
+                            chunk = latents[i:i+chunk_size]
+                            with torch.no_grad():
+                                chunk_decoded = original_vae_decode(chunk, return_dict=return_dict)
+                                if return_dict:
+                                    chunk_decoded = chunk_decoded.sample
+                            
+                            # Move to CPU immediately
+                            chunk_decoded = chunk_decoded.cpu()
+                            decoded_chunks.append(chunk_decoded)
+                            
+                            # Clear GPU cache
+                            del chunk
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        
+                        # Concatenate on CPU
+                        result = torch.cat(decoded_chunks, dim=0)
+                        del decoded_chunks
+                    else:
+                        # No optimization: use original decode
+                        result = original_vae_decode(latents, return_dict=return_dict)
+                        if return_dict:
+                            result = result.sample
                     
                     if return_dict:
                         try:
@@ -679,8 +762,13 @@ def main() -> int:
                     return original_vae_decode(latents, return_dict=return_dict)
             
             # Apply monkey patch to VAE instance
-            pipeline.vae.decode = sequential_vae_decode_wrapper
-            print("[INFO] Applied sequential VAE decoding patch (decodes one layer at a time)", flush=True)
+            pipeline.vae.decode = optimized_vae_decode_wrapper
+            optimizations = []
+            if enable_sequential_vae:
+                optimizations.append("sequential (one layer at a time)")
+            if enable_tiled_vae:
+                optimizations.append(f"tiled (tile_size={vae_tile_size})")
+            print(f"[INFO] Applied optimized VAE decoding: {', '.join(optimizations)}", flush=True)
 
         # Use PipelineDataset instead of LayoutTrainDataset
         print("[INFO] Loading dataset using PipelineDataset (no HuggingFace download)...", flush=True)
