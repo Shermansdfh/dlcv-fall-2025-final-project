@@ -39,6 +39,6 @@ skip_fuse_lora: false  # Set to false to enable fuse_lora (faster inference, use
 
 # VRAM Optimization Parameters
 enable_sequential_vae: true  # Enable sequential VAE decoding (decode one layer at a time, move to CPU immediately)
-enable_tiled_vae: false  # Enable tiled VAE decoding to reduce VRAM (slower but uses less memory)
+enable_tiled_vae: true  # Enable tiled VAE decoding to reduce VRAM (slower but uses less memory)
 vae_tile_size: 512  # Tile size for tiled VAE decoding (only used if enable_tiled_vae=true)
 
