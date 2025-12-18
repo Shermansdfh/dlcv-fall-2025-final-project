@@ -373,7 +373,28 @@ def main() -> int:
     
     # Import necessary functions from cld_infer module
     original_initialize_pipeline = cld_infer.initialize_pipeline
-    get_input_box = cld_infer.get_input_box
+    
+    # Override get_input_box to use 8px quantization (VAE stride is 8)
+    # Original CLD code uses 16px, but VAE stride is actually 8 (from patchify patch_size=8)
+    # This ensures bbox coordinates are multiples of 8 for proper latent space conversion
+    def get_input_box(layer_boxes):
+        """
+        Quantize xyxy boxes to CLD's VAE stride (8px grid).
+        
+        VAE stride is 8 (from patchify patch_size=8 and pipeline bbox // 8 conversion).
+        This ensures bbox coordinates are multiples of 8, which is required for proper
+        latent space conversion (bbox coordinates are divided by 8 in pipeline).
+        """
+        list_layer_box = []
+        for layer_box in layer_boxes:
+            min_row, max_row = layer_box[1], layer_box[3]
+            min_col, max_col = layer_box[0], layer_box[2]
+            quantized_min_row = (min_row // 8) * 8
+            quantized_min_col = (min_col // 8) * 8
+            quantized_max_row = ((max_row // 8) + 1) * 8
+            quantized_max_col = ((max_col // 8) + 1) * 8
+            list_layer_box.append((quantized_min_col, quantized_min_row, quantized_max_col, quantized_max_row))
+        return list_layer_box
     
     # Wrap initialize_pipeline with timing and debug info
     # Also monkey patch key operations to track timing
