@@ -377,22 +377,45 @@ def main() -> int:
     # Override get_input_box to use 8px quantization (VAE stride is 8)
     # Original CLD code uses 16px, but VAE stride is actually 8 (from patchify patch_size=8)
     # This ensures bbox coordinates are multiples of 8 for proper latent space conversion
-    def get_input_box(layer_boxes):
+    def get_input_box(layer_boxes, img_width=None, img_height=None):
         """
         Quantize xyxy boxes to CLD's VAE stride (8px grid).
         
         VAE stride is 8 (from patchify patch_size=8 and pipeline bbox // 8 conversion).
         This ensures bbox coordinates are multiples of 8, which is required for proper
         latent space conversion (bbox coordinates are divided by 8 in pipeline).
+        
+        Args:
+            layer_boxes: List of [x1, y1, x2, y2] boxes
+            img_width: Image width (optional, for boundary clamping)
+            img_height: Image height (optional, for boundary clamping)
+        
+        Returns:
+            List of quantized boxes as (x1, y1, x2, y2) tuples
         """
         list_layer_box = []
         for layer_box in layer_boxes:
             min_row, max_row = layer_box[1], layer_box[3]
             min_col, max_col = layer_box[0], layer_box[2]
-            quantized_min_row = (min_row // 8) * 8
-            quantized_min_col = (min_col // 8) * 8
-            quantized_max_row = ((max_row // 8) + 1) * 8
-            quantized_max_col = ((max_col // 8) + 1) * 8
+            
+            # Floor to nearest multiple of 8 (min coordinates)
+            quantized_min_row = (int(min_row) // 8) * 8
+            quantized_min_col = (int(min_col) // 8) * 8
+            
+            # Ceil to nearest multiple of 8 (max coordinates)
+            # Use ((max + 7) // 8) * 8 instead of ((max // 8) + 1) * 8
+            # This preserves already-aligned coordinates (e.g., 800 stays 800, not 808)
+            quantized_max_row = ((int(max_row) + 7) // 8) * 8
+            quantized_max_col = ((int(max_col) + 7) // 8) * 8
+            
+            # Clamp to image boundaries if provided
+            if img_width is not None:
+                quantized_min_col = max(0, min(quantized_min_col, img_width))
+                quantized_max_col = max(quantized_min_col, min(quantized_max_col, img_width))
+            if img_height is not None:
+                quantized_min_row = max(0, min(quantized_min_row, img_height))
+                quantized_max_row = max(quantized_min_row, min(quantized_max_row, img_height))
+            
             list_layer_box.append((quantized_min_col, quantized_min_row, quantized_max_col, quantized_max_row))
         return list_layer_box
     
@@ -750,7 +773,8 @@ def main() -> int:
             adapter_img = batch["whole_img"][0]
             caption = batch["caption"][0]
             
-            layer_boxes = get_input_box(batch["layout"][0])
+            # Pass image dimensions to get_input_box for boundary clamping
+            layer_boxes = get_input_box(batch["layout"][0], img_width=width, img_height=height)
             
             # Clear batch from memory before pipeline call
             del batch

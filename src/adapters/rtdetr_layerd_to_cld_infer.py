@@ -21,22 +21,48 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TypedDict
 
 import numpy as np
 
-def get_input_box(layer_boxes: Sequence[Sequence[float]]) -> List[Tuple[int, int, int, int]]:
+def get_input_box(
+    layer_boxes: Sequence[Sequence[float]], 
+    img_width: Optional[int] = None, 
+    img_height: Optional[int] = None
+) -> List[Tuple[int, int, int, int]]:
     """
-    Quantize xyxy boxes to CLD's 16px grid (same behavior as CLD `tools.tools.get_input_box`).
+    Quantize xyxy boxes to CLD's VAE stride (8px grid).
+    
+    VAE stride is 8 (from patchify patch_size=8 and pipeline bbox // 8 conversion).
+    This ensures bbox coordinates are multiples of 8, which is required for proper
+    latent space conversion (bbox coordinates are divided by 8 in pipeline).
 
-    - min coords: floor to nearest multiple of 16
-    - max coords: ceil to *next* multiple of 16 (note: even if already aligned, it will expand by +16)
+    Args:
+        layer_boxes: List of [x1, y1, x2, y2] boxes
+        img_width: Image width (optional, for boundary clamping)
+        img_height: Image height (optional, for boundary clamping)
+
+    - min coords: floor to nearest multiple of 8
+    - max coords: ceil to nearest multiple of 8 (preserves already-aligned coordinates)
     """
     list_layer_box: List[Tuple[int, int, int, int]] = []
     for layer_box in layer_boxes:
         min_row, max_row = float(layer_box[1]), float(layer_box[3])
         min_col, max_col = float(layer_box[0]), float(layer_box[2])
 
-        quantized_min_row = (int(min_row) // 16) * 16
-        quantized_min_col = (int(min_col) // 16) * 16
-        quantized_max_row = ((int(max_row) // 16) + 1) * 16
-        quantized_max_col = ((int(max_col) // 16) + 1) * 16
+        # Floor to nearest multiple of 8 (min coordinates)
+        quantized_min_row = (int(min_row) // 8) * 8
+        quantized_min_col = (int(min_col) // 8) * 8
+        
+        # Ceil to nearest multiple of 8 (max coordinates)
+        # Use ((max + 7) // 8) * 8 instead of ((max // 8) + 1) * 8
+        # This preserves already-aligned coordinates (e.g., 800 stays 800, not 808)
+        quantized_max_row = ((int(max_row) + 7) // 8) * 8
+        quantized_max_col = ((int(max_col) + 7) // 8) * 8
+        
+        # Clamp to image boundaries if provided
+        if img_width is not None:
+            quantized_min_col = max(0, min(quantized_min_col, img_width))
+            quantized_max_col = max(quantized_min_col, min(quantized_max_col, img_width))
+        if img_height is not None:
+            quantized_min_row = max(0, min(quantized_min_row, img_height))
+            quantized_max_row = max(quantized_min_row, min(quantized_max_row, img_height))
 
         list_layer_box.append((quantized_min_col, quantized_min_row, quantized_max_col, quantized_max_row))
     return list_layer_box
@@ -314,7 +340,9 @@ def pipeline_to_cld_samples(
             caption="",  # Empty caption, will be filled in Step 3.5
         )
 
-        quantized = get_input_box(po["ordered_bboxes"])
+        # Get image dimensions for boundary clamping
+        height, width = rtdetr_data["image_size"]
+        quantized = get_input_box(po["ordered_bboxes"], img_width=width, img_height=height)
 
         yield CLDSample(
             image_path=rtdetr_data["image_path"],
