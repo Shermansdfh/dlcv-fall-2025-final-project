@@ -301,6 +301,25 @@ rtdetr:
 
 詳細說明: [scripts/README_SETUP.md](scripts/README_SETUP.md)
 
+### RTDETR Checkpoint 下載
+
+使用 `gdown` 從 Google Drive 下載訓練好的 RTDETR checkpoint：
+
+```bash
+# 安裝 gdown（如果尚未安裝）
+pip install gdown
+
+# 創建目錄（如果不存在）
+mkdir -p checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights
+
+# 下載 RTDETR checkpoint
+gdown --id 1TT5iBr1ber8pT0E7tcfUE-FV1ssn4dcQ -O checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt
+```
+
+**下載後**：
+- Checkpoint 會保存到 `checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt`
+- 這是 pipeline 配置中的預設路徑，無需額外配置即可使用
+
 ### CLD 模型下載
 
 - **`scripts/download_cld_assets.py`** - 下載 CLD 所需的模型和權重
