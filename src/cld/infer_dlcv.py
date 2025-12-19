@@ -54,6 +54,12 @@ def main() -> int:
         default=None,
         help="third_party CLD's infer.py path (default: <repo_root>/third_party/cld/infer/infer.py).",
     )
+    parser.add_argument(
+        "--start_from",
+        type=int,
+        default=0,
+        help="Start processing from the Nth JSON file (0-indexed). Useful for resuming interrupted runs. (default: 0)",
+    )
     args = parser.parse_args()
 
     # Don't hardcode CUDA_VISIBLE_DEVICES here, leave it to scheduler/launcher
@@ -488,6 +494,9 @@ def main() -> int:
     # Load config
     config = cld_infer.load_config(str(config_path))
     
+    # Store args for use in inference_layout_pipeline closure
+    _args_start_from = args.start_from
+    
     def initialize_pipeline_with_timing(config):
         """Wrapped initialize_pipeline with detailed timing information."""
         print("[DEBUG] initialize_pipeline: Starting...", flush=True)
@@ -765,11 +774,28 @@ def main() -> int:
 
         generator = torch.Generator(device=torch.device("cuda")).manual_seed(config.get('seed', 42))
 
-        idx = 0
-        import gc  # For garbage collection
+        # Get start_from parameter from config or command line args
+        # Note: _args_start_from is captured from outer scope (main function)
+        start_from = config.get('start_from', 0)
+        # Override with command line args if provided
+        if _args_start_from > 0:
+            start_from = _args_start_from
         
-        for batch in loader:
-            print(f"Processing case {idx}", flush=True)
+        if start_from > 0:
+            print(f"[INFO] Starting from file index {start_from} (skipping first {start_from} files)", flush=True)
+            if start_from >= len(dataset):
+                print(f"❌ Error: start_from ({start_from}) >= number of files ({len(dataset)})", flush=True)
+                raise ValueError(f"start_from ({start_from}) must be less than number of files ({len(dataset)})")
+
+        import gc  # For garbage collection
+        import itertools
+        
+        # Skip first start_from batches if start_from > 0
+        batch_iter = itertools.islice(loader, start_from, None) if start_from > 0 else loader
+        
+        idx = 0  # Always start from 0 for case naming (case_0, case_1, ...)
+        for batch in batch_iter:
+            print(f"Processing case {idx} (file index {start_from + idx} in dataset)", flush=True)
             
             # Clear cache before processing each image
             if torch.cuda.is_available():

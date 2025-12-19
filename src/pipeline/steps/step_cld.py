@@ -26,7 +26,8 @@ def resolve_path(path: str, config_path: Path) -> Path:
 def run_step4_cld(
     pipeline_config_path: Path,
     cld_infer_config_path: Path = None,
-    conda_env: str = None
+    conda_env: str = None,
+    start_from: int = 0
 ) -> int:
     """
     Run CLD inference step.
@@ -36,6 +37,7 @@ def run_step4_cld(
         cld_infer_config_path: Path to CLD inference config (e.g., configs/exp001/cld/infer.yaml)
                               If None, will try to infer from pipeline config location
         conda_env: Conda environment name (default: read from config or "CLD")
+        start_from: Start processing from the Nth JSON file (0-indexed). Useful for resuming interrupted runs.
     
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -104,11 +106,15 @@ def run_step4_cld(
             break
     
     # Build shell command: source conda.sh && conda activate <env> && python <script> && conda deactivate
+    start_from_arg = ""
+    if start_from > 0:
+        start_from_arg = f' --start_from {start_from}'
+    
     if conda_sh:
-        shell_cmd = f'source "{conda_sh}" && conda activate {conda_env} && python "{cld_script}" --config_path "{cld_infer_config_path}" && conda deactivate'
+        shell_cmd = f'source "{conda_sh}" && conda activate {conda_env} && python "{cld_script}" --config_path "{cld_infer_config_path}"{start_from_arg} && conda deactivate'
     else:
         # Fallback: try to use conda shell hook (works if conda is in PATH)
-        shell_cmd = f'eval "$(conda shell.bash hook)" && conda activate {conda_env} && python "{cld_script}" --config_path "{cld_infer_config_path}" && conda deactivate'
+        shell_cmd = f'eval "$(conda shell.bash hook)" && conda activate {conda_env} && python "{cld_script}" --config_path "{cld_infer_config_path}"{start_from_arg} && conda deactivate'
     
     print("=" * 60)
     print("STEP 4: CLD Inference")
@@ -117,6 +123,8 @@ def run_step4_cld(
     print(f"   Environment: {conda_env}")
     print(f"   Pipeline config: {pipeline_config_path}")
     print(f"   CLD inference config: {cld_infer_config_path}")
+    if start_from > 0:
+        print(f"   Starting from file index: {start_from}")
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         print(f"   CUDA_VISIBLE_DEVICES: {os.environ['CUDA_VISIBLE_DEVICES']}")
     print()
@@ -159,6 +167,12 @@ if __name__ == "__main__":
         default="CLD",
         help="Conda environment name (default: CLD)"
     )
+    parser.add_argument(
+        "--start-from",
+        type=int,
+        default=0,
+        help="Start processing from the Nth JSON file (0-indexed). Useful for resuming interrupted runs. (default: 0)"
+    )
     args = parser.parse_args()
     
     pipeline_config_path = Path(args.config).resolve()
@@ -170,7 +184,8 @@ if __name__ == "__main__":
     exit_code = run_step4_cld(
         pipeline_config_path,
         cld_infer_config_path=cld_infer_config_path,
-        conda_env=args.conda_env
+        conda_env=args.conda_env,
+        start_from=args.start_from
     )
     sys.exit(exit_code)
 
