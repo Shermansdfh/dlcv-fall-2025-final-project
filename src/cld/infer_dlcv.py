@@ -385,6 +385,10 @@ def main() -> int:
         This ensures bbox coordinates are multiples of 8, which is required for proper
         latent space conversion (bbox coordinates are divided by 8 in pipeline).
         
+        IMPORTANT: CLD requires each layer to have at least 1x1 in latent space,
+        which corresponds to at least 8x8 in pixel space. This function ensures
+        that quantized boxes have minimum size of 8x8.
+        
         Args:
             layer_boxes: List of [x1, y1, x2, y2] boxes
             img_width: Image width (optional, for boundary clamping)
@@ -408,13 +412,20 @@ def main() -> int:
             quantized_max_row = ((int(max_row) + 7) // 8) * 8
             quantized_max_col = ((int(max_col) + 7) // 8) * 8
             
+            # Ensure minimum size of 8x8 (required for CLD: at least 1x1 in latent space)
+            # If width or height is 0 after quantization, expand by 8 pixels
+            if quantized_max_col <= quantized_min_col:
+                quantized_max_col = quantized_min_col + 8
+            if quantized_max_row <= quantized_min_row:
+                quantized_max_row = quantized_min_row + 8
+            
             # Clamp to image boundaries if provided
             if img_width is not None:
-                quantized_min_col = max(0, min(quantized_min_col, img_width))
-                quantized_max_col = max(quantized_min_col, min(quantized_max_col, img_width))
+                quantized_min_col = max(0, min(quantized_min_col, img_width - 8))
+                quantized_max_col = max(quantized_min_col + 8, min(quantized_max_col, img_width))
             if img_height is not None:
-                quantized_min_row = max(0, min(quantized_min_row, img_height))
-                quantized_max_row = max(quantized_min_row, min(quantized_max_row, img_height))
+                quantized_min_row = max(0, min(quantized_min_row, img_height - 8))
+                quantized_max_row = max(quantized_min_row + 8, min(quantized_max_row, img_height))
             
             list_layer_box.append((quantized_min_col, quantized_min_row, quantized_max_col, quantized_max_row))
         return list_layer_box
