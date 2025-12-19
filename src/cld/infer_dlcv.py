@@ -374,20 +374,16 @@ def main() -> int:
     # Import necessary functions from cld_infer module
     original_initialize_pipeline = cld_infer.initialize_pipeline
     
-    # Override get_input_box to use 8px quantization (VAE stride is 8)
-    # Original CLD code uses 16px, but VAE stride is actually 8 (from patchify patch_size=8)
-    # This ensures bbox coordinates are multiples of 8 for proper latent space conversion
+    # Override get_input_box to use 16px quantization
+    # This ensures bbox coordinates and dimensions are multiples of 16px
     def get_input_box(layer_boxes, img_width=None, img_height=None):
         """
-        Quantize xyxy boxes to CLD's VAE stride (8px grid).
+        Quantize xyxy boxes to 16px grid.
         
-        VAE stride is 8 (from patchify patch_size=8 and pipeline bbox // 8 conversion).
-        This ensures bbox coordinates are multiples of 8, which is required for proper
-        latent space conversion (bbox coordinates are divided by 8 in pipeline).
+        This ensures bbox coordinates and dimensions are multiples of 16px,
+        which is required for proper CLD inference processing.
         
-        IMPORTANT: CLD requires each layer to have at least 1x1 in latent space,
-        which corresponds to at least 8x8 in pixel space. This function ensures
-        that quantized boxes have minimum size of 8x8.
+        IMPORTANT: This function ensures that quantized boxes have minimum size of 16x16 pixels.
         
         Args:
             layer_boxes: List of [x1, y1, x2, y2] boxes
@@ -402,30 +398,30 @@ def main() -> int:
             min_row, max_row = layer_box[1], layer_box[3]
             min_col, max_col = layer_box[0], layer_box[2]
             
-            # Floor to nearest multiple of 8 (min coordinates)
-            quantized_min_row = (int(min_row) // 8) * 8
-            quantized_min_col = (int(min_col) // 8) * 8
+            # Floor to nearest multiple of 16 (min coordinates)
+            quantized_min_row = (int(min_row) // 16) * 16
+            quantized_min_col = (int(min_col) // 16) * 16
             
-            # Ceil to nearest multiple of 8 (max coordinates)
-            # Use ((max + 7) // 8) * 8 instead of ((max // 8) + 1) * 8
-            # This preserves already-aligned coordinates (e.g., 800 stays 800, not 808)
-            quantized_max_row = ((int(max_row) + 7) // 8) * 8
-            quantized_max_col = ((int(max_col) + 7) // 8) * 8
+            # Ceil to nearest multiple of 16 (max coordinates)
+            # Use ((max + 15) // 16) * 16 instead of ((max // 16) + 1) * 16
+            # This preserves already-aligned coordinates (e.g., 800 stays 800, not 816)
+            quantized_max_row = ((int(max_row) + 15) // 16) * 16
+            quantized_max_col = ((int(max_col) + 15) // 16) * 16
             
-            # Ensure minimum size of 8x8 (required for CLD: at least 1x1 in latent space)
-            # If width or height is 0 after quantization, expand by 8 pixels
+            # Ensure minimum size of 16x16
+            # If width or height is 0 after quantization, expand by 16 pixels
             if quantized_max_col <= quantized_min_col:
-                quantized_max_col = quantized_min_col + 8
+                quantized_max_col = quantized_min_col + 16
             if quantized_max_row <= quantized_min_row:
-                quantized_max_row = quantized_min_row + 8
+                quantized_max_row = quantized_min_row + 16
             
             # Clamp to image boundaries if provided
             if img_width is not None:
-                quantized_min_col = max(0, min(quantized_min_col, img_width - 8))
-                quantized_max_col = max(quantized_min_col + 8, min(quantized_max_col, img_width))
+                quantized_min_col = max(0, min(quantized_min_col, img_width - 16))
+                quantized_max_col = max(quantized_min_col + 16, min(quantized_max_col, img_width))
             if img_height is not None:
-                quantized_min_row = max(0, min(quantized_min_row, img_height - 8))
-                quantized_max_row = max(quantized_min_row + 8, min(quantized_max_row, img_height))
+                quantized_min_row = max(0, min(quantized_min_row, img_height - 16))
+                quantized_max_row = max(quantized_min_row + 16, min(quantized_max_row, img_height))
             
             list_layer_box.append((quantized_min_col, quantized_min_row, quantized_max_col, quantized_max_row))
         return list_layer_box
