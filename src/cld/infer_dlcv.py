@@ -793,9 +793,9 @@ def main() -> int:
         # Skip first start_from batches if start_from > 0
         batch_iter = itertools.islice(loader, start_from, None) if start_from > 0 else loader
         
-        idx = 0  # Always start from 0 for case naming (case_0, case_1, ...)
+        idx = start_from  # Start idx from start_from, so output case_N matches file index N
         for batch in batch_iter:
-            print(f"Processing case {idx} (file index {start_from + idx} in dataset)", flush=True)
+            print(f"Processing case {idx}", flush=True)
             
             # Clear cache before processing each image
             if torch.cuda.is_available():
