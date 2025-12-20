@@ -112,9 +112,44 @@ def main():
     
     print(f"[INFO] Using device: {device}")
     
+    # Check and fix checkpoint path
+    from depth_pro.depth_pro import DEFAULT_MONODEPTH_CONFIG_DICT, DepthProConfig
+    
+    # Try to find checkpoint in ml-depth-pro directory
+    checkpoint_path = ML_DEPTH_PRO_PATH / "checkpoints" / "depth_pro.pt"
+    
+    if not checkpoint_path.exists():
+        # Try relative path from ml-depth-pro directory
+        checkpoint_path_rel = Path("./checkpoints/depth_pro.pt")
+        if checkpoint_path_rel.exists():
+            checkpoint_path = checkpoint_path_rel.resolve()
+        else:
+            print(f"[ERROR] Checkpoint file not found!")
+            print(f"  Tried: {checkpoint_path}")
+            print(f"  Tried: {checkpoint_path_rel.resolve()}")
+            print(f"\n[INFO] Please download the checkpoint first:")
+            print(f"  cd depth_exp/ml-depth-pro")
+            print(f"  source get_pretrained_models.sh")
+            print(f"\nOr manually download from:")
+            print(f"  https://github.com/apple/ml-depth-pro")
+            sys.exit(1)
+    
+    print(f"[INFO] Using checkpoint: {checkpoint_path}")
+    
+    # Create custom config with correct checkpoint path
+    custom_config = DepthProConfig(
+        patch_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.patch_encoder_preset,
+        image_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.image_encoder_preset,
+        decoder_features=DEFAULT_MONODEPTH_CONFIG_DICT.decoder_features,
+        checkpoint_uri=str(checkpoint_path),
+        use_fov_head=DEFAULT_MONODEPTH_CONFIG_DICT.use_fov_head,
+        fov_encoder_preset=DEFAULT_MONODEPTH_CONFIG_DICT.fov_encoder_preset,
+    )
+    
     # Load depth model
     print("[INFO] Loading depth model...")
     model, transform = depth_pro.create_model_and_transforms(
+        config=custom_config,
         device=device,
         precision=torch.half if device.type == "cuda" else torch.float32,
     )
