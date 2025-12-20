@@ -22,8 +22,9 @@ val_max_samples: null
 dataset_seed: 42
 shuffle_buffer_size: 2000
 caption_json_path: null  # null to use default path (depth_exp/caption_llava15.json)
-use_depth: false  # Set to true to enable depth channel from ml-depth-pro
-depth_device: null  # null for auto (cuda if available, else cpu)
+use_depth: false  # Set to true to enable depth channel
+depth_map_dir: null  # Path to pre-generated depth maps directory (recommended). If null and use_depth=true, will generate on-the-fly (requires depth-pro env)
+depth_device: null  # Only used if depth_map_dir is null. null for auto (cuda if available, else cpu)
 
 # Model paths
 pretrained_model_name_or_path: "Path_to_pretrained_FLUX_model"

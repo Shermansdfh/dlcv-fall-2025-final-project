@@ -82,8 +82,44 @@ ckpt/
 
 - ✅ 使用 `DLCVCLDDataset` 從 HuggingFace 載入數據
 - ✅ 自動從 `caption_llava15.json` 讀取 caption
-- ✅ 可選啟用深度 channel（使用 ml-depth-pro）
+- ✅ 可選啟用深度 channel（支援預生成或即時生成）
 - ✅ **僅訓練 MultiLayer-Adapter (MLCA)**，Transformer 完全凍結
+
+### 兩步訓練流程（推薦）
+
+#### 步驟 1：生成深度圖（在 depth-pro 環境中）
+
+```bash
+# 激活 depth-pro 環境
+conda activate depth-pro
+
+# 生成深度圖
+python scripts/generate_depth_maps.py \
+    --max_samples 20000 \
+    --output_dir depth_exp/depth_maps \
+    --device cuda
+```
+
+這會為所有圖像生成深度圖並保存為 `.npz` 文件。
+
+#### 步驟 2：訓練 CLD（在 CLD 環境中）
+
+```bash
+# 激活 CLD 環境
+conda activate CLD
+
+# 配置 train_dlcv.yaml
+# 設置 use_depth: true 和 depth_map_dir: "depth_exp/depth_maps"
+
+# 開始訓練
+cd depth_exp/CLD/train
+python train_dlcv.py -c train_dlcv.yaml
+```
+
+**優點**：
+- 訓練時不需要 depth-pro 環境
+- 節省 GPU 記憶體
+- 深度圖可以重複使用
 
 ### 配置訓練
 
@@ -140,16 +176,47 @@ use_depth: false
 train_max_samples: 20000  # 限制樣本數量
 ```
 
-#### 2. 使用深度 channel 訓練
+#### 2. 使用深度 channel 訓練（推薦：兩步流程）
+
+**方法 A：預生成深度圖（推薦）**
+
+這是最推薦的方式，將深度生成和訓練分開：
+
+**步驟 1：生成深度圖（在 depth-pro 環境中）**
+```bash
+conda activate depth-pro
+python scripts/generate_depth_maps.py \
+    --max_samples 20000 \
+    --output_dir depth_exp/depth_maps \
+    --device cuda
+```
+
+**步驟 2：訓練（在 CLD 環境中，不需要 depth-pro）**
 ```yaml
 use_depth: true
+depth_map_dir: "depth_exp/depth_maps"  # 指向預生成的深度圖目錄
+```
+
+**優點**：
+- ✅ 訓練時不需要 depth-pro 環境
+- ✅ 節省 GPU 記憶體（不需要同時載入兩個模型）
+- ✅ 可以提前批量生成，訓練更快
+- ✅ 深度圖可以重複使用
+
+**方法 B：即時生成深度圖（不推薦）**
+
+如果沒有預生成深度圖，可以在訓練時即時生成：
+
+```yaml
+use_depth: true
+depth_map_dir: null  # 設為 null 表示即時生成
 depth_device: "cuda"  # 或 "cpu"
 ```
 
-**注意**：使用深度 channel 需要：
-- 已安裝 ml-depth-pro
+**注意**：此方法需要：
+- 已安裝 ml-depth-pro（在 CLD 環境中）
 - 已下載 Depth Pro 預訓練模型
-- 更多 GPU 記憶體
+- 更多 GPU 記憶體（同時載入 depth model 和 CLD model）
 
 #### 3. 從 checkpoint 恢復
 ```yaml
@@ -370,6 +437,13 @@ A: 可以，但需要修改 dataset 導入。`train_dlcv.py` 已經整合了 DLC
 
 **Q: 深度 channel 是必需的嗎？**  
 A: 不是。深度 channel 是可選功能，可以幫助模型理解場景深度，但標準訓練不需要。
+
+**Q: 訓練時需要 depth-pro 環境嗎？**  
+A: 不需要！推薦使用兩步流程：
+1. 在 depth-pro 環境中預生成深度圖
+2. 在 CLD 環境中訓練，直接讀取預生成的深度圖文件
+
+這樣訓練時不需要載入 depth model，節省記憶體且更快。
 
 **Q: 如何知道訓練是否正常？**  
 A: 觀察：

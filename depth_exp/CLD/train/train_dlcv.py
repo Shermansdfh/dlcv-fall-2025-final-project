@@ -134,6 +134,7 @@ def train(config_path):
     train_max_samples = config.get('train_max_samples', None)
     val_max_samples = config.get('val_max_samples', None)
     use_depth = config.get('use_depth', False)
+    depth_map_dir = config.get('depth_map_dir', None)
     depth_device = config.get('depth_device', None)
     if depth_device:
         depth_device = torch.device(depth_device)
@@ -146,6 +147,7 @@ def train(config_path):
         caption_json_path=config.get('caption_json_path', None),
         use_depth=use_depth,
         depth_device=depth_device,
+        depth_map_dir=depth_map_dir,
     )
     loader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=0, collate_fn=collate_fn)
     print(f"[INFO] Dataset loaded: {len(dataset)} samples", flush=True)
