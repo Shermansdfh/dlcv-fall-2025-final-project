@@ -38,7 +38,7 @@ weights/*
 data/
 !data/.gitkeep
 !data/README.md
-cld_gif/
+clean_results/
 
 # Input data
 inputs/
