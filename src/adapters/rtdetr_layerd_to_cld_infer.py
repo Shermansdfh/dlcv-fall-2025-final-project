@@ -27,42 +27,51 @@ def get_input_box(
     img_height: Optional[int] = None
 ) -> List[Tuple[int, int, int, int]]:
     """
-    Quantize xyxy boxes to CLD's VAE stride (8px grid).
+    Quantize xyxy boxes to 16px grid.
     
-    VAE stride is 8 (from patchify patch_size=8 and pipeline bbox // 8 conversion).
-    This ensures bbox coordinates are multiples of 8, which is required for proper
-    latent space conversion (bbox coordinates are divided by 8 in pipeline).
+    This ensures bbox coordinates and dimensions are multiples of 16px,
+    which is required for proper CLD inference processing.
+
+    IMPORTANT: This function ensures that quantized boxes have minimum size of 16x16 pixels.
 
     Args:
         layer_boxes: List of [x1, y1, x2, y2] boxes
         img_width: Image width (optional, for boundary clamping)
         img_height: Image height (optional, for boundary clamping)
 
-    - min coords: floor to nearest multiple of 8
-    - max coords: ceil to nearest multiple of 8 (preserves already-aligned coordinates)
+    - min coords: floor to nearest multiple of 16
+    - max coords: ceil to nearest multiple of 16 (preserves already-aligned coordinates)
+    - minimum size: ensures at least 16x16 pixels
     """
     list_layer_box: List[Tuple[int, int, int, int]] = []
     for layer_box in layer_boxes:
         min_row, max_row = float(layer_box[1]), float(layer_box[3])
         min_col, max_col = float(layer_box[0]), float(layer_box[2])
 
-        # Floor to nearest multiple of 8 (min coordinates)
-        quantized_min_row = (int(min_row) // 8) * 8
-        quantized_min_col = (int(min_col) // 8) * 8
+        # Floor to nearest multiple of 16 (min coordinates)
+        quantized_min_row = (int(min_row) // 16) * 16
+        quantized_min_col = (int(min_col) // 16) * 16
         
-        # Ceil to nearest multiple of 8 (max coordinates)
-        # Use ((max + 7) // 8) * 8 instead of ((max // 8) + 1) * 8
-        # This preserves already-aligned coordinates (e.g., 800 stays 800, not 808)
-        quantized_max_row = ((int(max_row) + 7) // 8) * 8
-        quantized_max_col = ((int(max_col) + 7) // 8) * 8
+        # Ceil to nearest multiple of 16 (max coordinates)
+        # Use ((max + 15) // 16) * 16 instead of ((max // 16) + 1) * 16
+        # This preserves already-aligned coordinates (e.g., 800 stays 800, not 816)
+        quantized_max_row = ((int(max_row) + 15) // 16) * 16
+        quantized_max_col = ((int(max_col) + 15) // 16) * 16
+        
+        # Ensure minimum size of 16x16
+        # If width or height is 0 after quantization, expand by 16 pixels
+        if quantized_max_col <= quantized_min_col:
+            quantized_max_col = quantized_min_col + 16
+        if quantized_max_row <= quantized_min_row:
+            quantized_max_row = quantized_min_row + 16
         
         # Clamp to image boundaries if provided
         if img_width is not None:
-            quantized_min_col = max(0, min(quantized_min_col, img_width))
-            quantized_max_col = max(quantized_min_col, min(quantized_max_col, img_width))
+            quantized_min_col = max(0, min(quantized_min_col, img_width - 16))
+            quantized_max_col = max(quantized_min_col + 16, min(quantized_max_col, img_width))
         if img_height is not None:
-            quantized_min_row = max(0, min(quantized_min_row, img_height))
-            quantized_max_row = max(quantized_min_row, min(quantized_max_row, img_height))
+            quantized_min_row = max(0, min(quantized_min_row, img_height - 16))
+            quantized_max_row = max(quantized_min_row + 16, min(quantized_max_row, img_height))
 
         list_layer_box.append((quantized_min_col, quantized_min_row, quantized_max_col, quantized_max_row))
     return list_layer_box
@@ -182,7 +191,12 @@ class LayerDecompositionPipeline:
 
         if boxes.size == 0:
             # Even with no boxes, add a background bbox
-            background_bbox = [0, 0, width - 1, height - 1]
+            # Ensure background bbox is aligned to 16px grid
+            background_x1 = 0
+            background_y1 = 0
+            background_x2 = ((width - 1 + 15) // 16) * 16  # Ceil to nearest multiple of 16
+            background_y2 = ((height - 1 + 15) // 16) * 16  # Ceil to nearest multiple of 16
+            background_bbox = [background_x1, background_y1, background_x2, background_y2]
             background_debug = LayerMatchResult(
                 box_index=-1,
                 mask_index=-1,
@@ -217,13 +231,39 @@ class LayerDecompositionPipeline:
         areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
         order = sorted(range(len(boxes)), key=lambda i: (layer_indices[i], -areas[i]))
 
-        ordered_bboxes = [[int(round(c)) for c in boxes[i, :4]] for i in order]
+        # Quantize all bboxes to 16px grid before adding to ordered_bboxes
+        ordered_bboxes = []
+        for i in order:
+            x1, y1, x2, y2 = boxes[i, :4]
+            # Floor min coords to nearest multiple of 16
+            quantized_x1 = (int(x1) // 16) * 16
+            quantized_y1 = (int(y1) // 16) * 16
+            # Ceil max coords to nearest multiple of 16
+            quantized_x2 = ((int(x2) + 15) // 16) * 16
+            quantized_y2 = ((int(y2) + 15) // 16) * 16
+            # Ensure minimum size of 16x16
+            if quantized_x2 <= quantized_x1:
+                quantized_x2 = quantized_x1 + 16
+            if quantized_y2 <= quantized_y1:
+                quantized_y2 = quantized_y1 + 16
+            # Clamp to image boundaries
+            quantized_x1 = max(0, min(quantized_x1, width - 16))
+            quantized_y1 = max(0, min(quantized_y1, height - 16))
+            quantized_x2 = max(quantized_x1 + 16, min(quantized_x2, width))
+            quantized_y2 = max(quantized_y1 + 16, min(quantized_y2, height))
+            ordered_bboxes.append([quantized_x1, quantized_y1, quantized_x2, quantized_y2])
+        
         ordered_layers = [int(layer_indices[i]) for i in order]
         ordered_debug = [debug_matches[i] for i in order]
 
         # Always add a full-image bbox as background layer (layer index 0)
         # This ensures CLD inference always has a background layer
-        background_bbox = [0, 0, width - 1, height - 1]
+        # Ensure background bbox is aligned to 16px grid
+        background_x1 = 0
+        background_y1 = 0
+        background_x2 = ((width - 1 + 15) // 16) * 16  # Ceil to nearest multiple of 16
+        background_y2 = ((height - 1 + 15) // 16) * 16  # Ceil to nearest multiple of 16
+        background_bbox = [background_x1, background_y1, background_x2, background_y2]
         ordered_bboxes.insert(0, background_bbox)
         ordered_layers.insert(0, 0)  # Background layer index is 0
         # Add a debug entry for the background bbox

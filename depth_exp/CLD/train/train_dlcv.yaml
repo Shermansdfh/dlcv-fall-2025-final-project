@@ -1,0 +1,37 @@
+seed: 42
+max_layer_num: 52
+num_inference_steps: 28
+
+lora_rank: 64
+lora_alpha: 64
+lora_dropout: 0
+
+max_steps: 200000
+log_every: 1000
+save_every: 1000
+max_sequence_length: 512
+cfg: 4.0
+accum_steps: 4
+optimizer: Prodigy
+
+adapter_scale: 0.9
+
+# Dataset configuration
+train_max_samples: null  # null for all samples, or specify a number
+val_max_samples: null
+dataset_seed: 42
+shuffle_buffer_size: 2000
+caption_json_path: null  # null to use default path (depth_exp/caption_llava15.json)
+use_depth: false  # Set to true to enable depth channel from ml-depth-pro
+depth_device: null  # null for auto (cuda if available, else cpu)
+
+# Model paths
+pretrained_model_name_or_path: "Path_to_pretrained_FLUX_model"
+pretrained_adapter_path: "Path_to_pretrained_FLUX_adapter"
+pretrained_lora_dir: "Path_to_pretrained_lora"  # Optional
+artplus_lora_dir: null  # Optional
+
+# Output
+output_dir: "Path_to_save_training_ckpt"
+resume_from: null  # Optional: path to checkpoint directory to resume from
+
