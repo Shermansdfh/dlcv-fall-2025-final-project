@@ -93,7 +93,7 @@ def prepare_dlcv_bbox_dataset(target_total=20000, output_dir=DATASET_PATH):
     # Create data.yaml
     with open(os.path.join(output_dir, "data.yaml"), "w") as f:
         f.write(f"path: {os.path.abspath(output_dir)}\n")
-        f.write("train: images/train\nval: images/val\nnames:\n  0: layout_element")
+        f.write("train: images/train\nval: images/val\nnames:\n  0: layout_element\n  1: text")
 
     print(f"🚀 Start processing (geometry first strategy)...")
     
@@ -117,6 +117,7 @@ def prepare_dlcv_bbox_dataset(target_total=20000, output_dir=DATASET_PATH):
             l_height = sample.get('height', [])
             l_angle = sample.get('angle', [])
             l_imgs = sample.get('image', [])
+            l_type = sample.get('type', [])
             
             label_lines = []
             has_valid_box = False
@@ -128,6 +129,9 @@ def prepare_dlcv_bbox_dataset(target_total=20000, output_dir=DATASET_PATH):
                 meta_h = float(l_height[i])
                 # Ensure the angle exists
                 meta_angle = float(l_angle[i]) if i < len(l_angle) else 0.0
+                # Get element type: 1 = text, others = layout_element
+                element_type = int(l_type[i]) if i < len(l_type) else 0
+                class_id = 1 if element_type == 1 else 0
                 
                 # Filter the full background
                 if meta_w * meta_h > (canvas_w * canvas_h * 0.95): continue
@@ -183,7 +187,7 @@ def prepare_dlcv_bbox_dataset(target_total=20000, output_dir=DATASET_PATH):
                     nh = fh / canvas_h
                     
                     if 0 <= cx <= 1 and 0 <= cy <= 1:
-                        label_lines.append(f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
+                        label_lines.append(f"{class_id} {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}")
                         has_valid_box = True
 
             if has_valid_box:
