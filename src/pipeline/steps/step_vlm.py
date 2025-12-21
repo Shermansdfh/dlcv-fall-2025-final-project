@@ -27,7 +27,7 @@ def run_step3_5_vlm(config_path: Path, conda_env: str = None, force: bool = Fals
     
     Args:
         config_path: Path to pipeline.yaml config file
-        conda_env: Conda environment name (default: read from config or "llava15")
+        conda_env: Conda environment name (default: read from config or "llava")
         force: Force regenerate captions even if they already exist
     
     Returns:
@@ -41,7 +41,7 @@ def run_step3_5_vlm(config_path: Path, conda_env: str = None, force: bool = Fals
     
     # Get conda env from config if not provided
     if conda_env is None:
-        conda_env = config.get("vlm_conda_env", "llava15")
+        conda_env = config.get("vlm_conda_env", "llava")
     
     # Check if VLM caption is enabled
     step3_5_config = config.get("step3_5", {})
@@ -102,8 +102,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--conda-env",
         type=str,
-        default="llava15",
-        help="Conda environment name (default: llava15)"
+        default="llava",
+        help="Conda environment name (default: llava)"
     )
     parser.add_argument(
         "--force", "-f",
