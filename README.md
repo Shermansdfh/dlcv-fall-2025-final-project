@@ -79,7 +79,7 @@ python -m src.pipeline.steps.step_rtdetr --config configs/my_experiment/pipeline
 python -m src.pipeline.steps.step_layerd --config configs/my_experiment/pipeline.yaml
 python -m src.pipeline.steps.step_conversion --config configs/my_experiment/pipeline.yaml
 python -m src.pipeline.steps.step_vlm --config configs/my_experiment/pipeline.yaml  # 可選
-python -m src.pipeline.steps.step_cld --config configs/my_experiment/pipeline.yaml
+python -m src.pipeline.steps.step_cld --config configs/my_experiment/pipeline.yaml 
 ```
 
 詳細說明請參考：[Pipeline 使用指南](PIPELINE_README.md)
@@ -591,6 +591,430 @@ python scripts/setup_environments.py --all --force
 
 ---
 
+## 📖 RTDETR Fine-tuning 完整指南
+
+本指南詳細說明如何針對 Layout Analysis 任務對 RTDETR 模型進行 fine-tuning。
+
+### 📋 目錄
+
+- [環境準備](#環境準備)
+- [資料集準備](#資料集準備)
+- [訓練模型](#訓練模型)
+- [訓練配置詳解](#訓練配置詳解)
+- [監控訓練過程](#監控訓練過程)
+- [使用訓練好的模型](#使用訓練好的模型)
+- [常見問題與故障排除](#常見問題與故障排除)
+
+---
+
+### 🔧 環境準備
+
+#### 1. 確保 Ultralytics 環境已設置
+
+```bash
+# 檢查環境是否存在
+conda env list | grep ultralytics
+
+# 如果不存在，執行環境設置
+python scripts/setup_environments.py --ultralytics
+```
+
+#### 2. 驗證環境
+
+```bash
+# 激活環境
+conda activate ultralytics
+
+# 驗證 Ultralytics 版本
+python -c "import ultralytics; print(ultralytics.__version__)"
+
+# 驗證 CUDA 可用性（訓練需要 GPU）
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+```
+
+---
+
+### 📦 資料集準備
+
+#### 1. 準備 DLCV Bounding Box Dataset
+
+```bash
+# 激活環境
+conda activate ultralytics
+
+# 執行資料集準備腳本
+python -m src.data.dlcv_bbox_dataset
+```
+
+**預設設定**：
+- 下載 20,000 張圖片
+- 自動劃分 train/val（90%/10%）
+- 輸出位置：`data/dlcv_bbox_dataset/`
+
+**自訂資料量**：
+
+編輯 `src/data/dlcv_bbox_dataset.py`，修改最後一行：
+
+```python
+if __name__ == "__main__":
+    prepare_dlcv_bbox_dataset(target_total=50000)  # 改為你想要的數量
+```
+
+#### 2. 資料集結構
+
+```
+data/dlcv_bbox_dataset/
+├── data.yaml              # YOLO 資料集配置
+├── images/
+│   ├── train/            # 訓練圖片 (90%)
+│   └── val/              # 驗證圖片 (10%)
+└── labels/
+    ├── train/            # 訓練標籤 (YOLO 格式)
+    └── val/              # 驗證標籤 (YOLO 格式)
+```
+
+#### 3. 資料集類別
+
+資料集包含兩個類別：
+
+- **Class 0: `layout_element`** - 一般布局元素（圖片、圖形等）
+- **Class 1: `text`** - 文字元素
+
+`data.yaml` 內容範例：
+
+```yaml
+path: /absolute/path/to/data/dlcv_bbox_dataset
+train: images/train
+val: images/val
+names:
+  0: layout_element
+  1: text
+```
+
+#### 4. 資料集處理邏輯
+
+資料集準備腳本會自動處理：
+
+- ✅ **旋轉物件**：使用幾何變換計算 AABB（Axis-Aligned Bounding Box）
+- ✅ **無旋轉物件**：使用 Alpha Crop 獲得更緊密的 bounding box
+- ✅ **背景過濾**：自動過濾佔 canvas 面積 >95% 的背景層
+- ✅ **類別標註**：根據 element type 自動標註為 layout_element 或 text
+- ✅ **格式轉換**：轉換為 YOLO 格式（normalized coordinates）
+
+#### 5. 驗證資料集
+
+```bash
+# 檢查資料集結構
+ls -lh data/dlcv_bbox_dataset/images/train/ | head -5
+ls -lh data/dlcv_bbox_dataset/labels/train/ | head -5
+
+# 檢查標籤格式（應該看到 class_id x_center y_center width height）
+head -3 data/dlcv_bbox_dataset/labels/train/*.txt
+```
+
+---
+
+### 🚀 訓練模型
+
+#### 1. 基本訓練命令
+
+```bash
+# 激活環境
+conda activate ultralytics
+
+# 執行訓練
+python -m src.bbox.train_rtdetr
+```
+
+或使用 `conda run`（無需手動激活）：
+
+```bash
+conda run -n ultralytics python -m src.bbox.train_rtdetr
+```
+
+#### 2. 訓練輸出
+
+訓練過程會自動：
+
+- 下載預訓練模型（如果不存在）：`checkpoints/rtdetr/rtdetr-l.pt`
+- 保存訓練日誌：`checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/`
+- 保存最佳模型：`checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt`
+- 保存最後模型：`checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/last.pt`
+
+#### 3. 訓練時間估算
+
+- **20K 圖片，100 epochs，batch=16，V100 GPU**：約 8-12 小時
+- **50K 圖片，100 epochs，batch=16，V100 GPU**：約 20-30 小時
+
+---
+
+### ⚙️ 訓練配置詳解
+
+#### 模型設定
+
+- **預訓練模型**：RTDETR-L (Large)
+  - 平衡準確度和速度的最佳選擇
+  - 自動下載到 `checkpoints/rtdetr/rtdetr-l.pt`
+
+#### 訓練超參數
+
+| 參數 | 值 | 說明 |
+|------|-----|------|
+| `epochs` | 100 | 訓練輪數（足夠 fine-tuning） |
+| `patience` | 15 | Early stopping：15 epochs 無改善則停止 |
+| `batch` | 16 | Batch size（V100 GPU，OOM 可降至 8） |
+| `imgsz` | 640 | 輸入圖像尺寸 |
+| `optimizer` | AdamW | Transformer 模型推薦優化器 |
+| `lr0` | 0.0001 | 初始學習率（fine-tuning 使用較小值） |
+| `workers` | 8 | 數據加載線程數 |
+| `cache` | True | 緩存圖像到 RAM，加速訓練 |
+| `amp` | True | 自動混合精度（節省記憶體） |
+
+#### 數據增強策略
+
+**關閉的增強**（避免破壞 layout 邏輯）：
+
+- ❌ **Mosaic** (`mosaic=0.0`)：避免破壞布局邏輯
+- ❌ **Mixup** (`mixup=0.0`)：避免透明度混淆
+- ❌ **旋轉** (`degrees=0.0`)：Layout 通常是直立的
+
+**保留的增強**（安全的增強）：
+
+- ✅ **縮放** (`scale=0.5`)：隨機縮放 ±50%，適應不同 canvas 尺寸
+- ✅ **水平翻轉** (`fliplr=0.5`)：Layout 通常左右對稱
+- ✅ **顏色變化** (`hsv_h=0.015, hsv_s=0.7, hsv_v=0.4`)：色調、飽和度、亮度變化
+
+#### 自訂訓練配置
+
+如需修改訓練參數，編輯 `src/bbox/train_rtdetr.py`：
+
+```python
+results = model.train(
+    data=DATASET_PATH / "data.yaml",
+    epochs=150,        # 增加訓練輪數
+    batch=8,           # 降低 batch size（如果 OOM）
+    lr0=0.00005,       # 降低學習率
+    # ... 其他參數
+)
+```
+
+---
+
+### 📊 監控訓練過程
+
+#### 1. 訓練日誌
+
+訓練過程會顯示：
+
+- 當前 epoch 和總 epochs
+- 訓練和驗證 loss
+- mAP (mean Average Precision) 指標
+- 訓練速度（images/sec）
+
+#### 2. TensorBoard（可選）
+
+Ultralytics 會自動記錄訓練日誌，可以使用 TensorBoard 可視化：
+
+```bash
+# 安裝 TensorBoard（如果尚未安裝）
+pip install tensorboard
+
+# 啟動 TensorBoard
+tensorboard --logdir checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/
+
+# 在瀏覽器打開 http://localhost:6006
+```
+
+#### 3. 檢查訓練結果
+
+```bash
+# 查看訓練目錄
+ls -lh checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/
+
+# 查看最佳模型
+ls -lh checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt
+
+# 查看訓練曲線（如果生成了 results.png）
+open checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/results.png
+```
+
+---
+
+### 🎯 使用訓練好的模型
+
+#### 1. 在 Pipeline 中使用
+
+編輯 `configs/exp001/pipeline.yaml`（或你的配置檔案）：
+
+```yaml
+rtdetr:
+  model_path: "checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt"
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+```
+
+#### 2. 直接使用模型進行推理
+
+```python
+from ultralytics import RTDETR
+
+# 載入訓練好的模型
+model = RTDETR("checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt")
+
+# 進行推理
+results = model("path/to/image.jpg")
+
+# 可視化結果
+results[0].show()
+```
+
+#### 3. 驗證模型性能
+
+```bash
+# 使用驗證集評估模型
+python -c "
+from ultralytics import RTDETR
+model = RTDETR('checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt')
+metrics = model.val(data='data/dlcv_bbox_dataset/data.yaml')
+print(f'mAP50: {metrics.box.map50:.4f}')
+print(f'mAP50-95: {metrics.box.map:.4f}')
+"
+```
+
+---
+
+### ❓ 常見問題與故障排除
+
+#### Q1: GPU 記憶體不足 (OOM)
+
+**解決方案**：
+
+1. **降低 batch size**：
+   ```python
+   batch=8  # 從 16 改為 8
+   ```
+
+2. **關閉圖像緩存**：
+   ```python
+   cache=False  # 從 True 改為 False
+   ```
+
+3. **降低圖像尺寸**：
+   ```python
+   imgsz=512  # 從 640 改為 512（可能影響準確度）
+   ```
+
+#### Q2: 訓練速度太慢
+
+**解決方案**：
+
+1. **啟用圖像緩存**：
+   ```python
+   cache=True  # 確保啟用
+   ```
+
+2. **增加 workers**：
+   ```python
+   workers=16  # 根據 CPU 核心數調整
+   ```
+
+3. **使用更小的模型**：
+   ```python
+   model = RTDETR("rtdetr-x.pt")  # 使用 Extra Small 版本（更快但準確度較低）
+   ```
+
+#### Q3: 驗證 loss 不下降或過擬合
+
+**解決方案**：
+
+1. **降低學習率**：
+   ```python
+   lr0=0.00005  # 從 0.0001 降低
+   ```
+
+2. **增加 Early Stopping patience**：
+   ```python
+   patience=20  # 從 15 增加
+   ```
+
+3. **增加數據增強**（如果尚未啟用）：
+   ```python
+   scale=0.5
+   fliplr=0.5
+   ```
+
+#### Q4: 模型準確度不理想
+
+**解決方案**：
+
+1. **增加訓練資料量**：
+   ```python
+   prepare_dlcv_bbox_dataset(target_total=50000)  # 增加資料量
+   ```
+
+2. **增加訓練輪數**：
+   ```python
+   epochs=150  # 從 100 增加
+   ```
+
+3. **使用更大的模型**：
+   ```python
+   model = RTDETR("rtdetr-x.pt")  # 使用 Extra Large 版本
+   ```
+
+#### Q5: 資料集下載失敗
+
+**解決方案**：
+
+1. **檢查網路連接**：
+   ```bash
+   # 測試 HuggingFace 連接
+   python -c "from datasets import load_dataset; print('OK')"
+   ```
+
+2. **使用代理或 VPN**（如果在某些地區）
+
+3. **手動下載資料集**：
+   ```python
+   # 在 Python 中手動下載
+   from datasets import load_dataset
+   dataset = load_dataset("WalkerHsu/DLCV2025_final_project_piccollage", split="train")
+   ```
+
+#### Q6: 訓練中斷如何恢復？
+
+**解決方案**：
+
+Ultralytics 會自動保存 `last.pt`，可以從中恢復：
+
+```python
+# 修改 train_rtdetr.py，載入 last.pt 而不是預訓練模型
+model = RTDETR("checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/last.pt")
+```
+
+---
+
+### 📝 訓練檢查清單
+
+在開始訓練前，確認：
+
+- [ ] Ultralytics 環境已正確設置
+- [ ] GPU 可用且 CUDA 正常
+- [ ] 資料集已準備完成（檢查 `data/dlcv_bbox_dataset/`）
+- [ ] `data.yaml` 配置正確（包含兩個類別）
+- [ ] 有足夠的磁碟空間（至少 10GB 用於 checkpoints）
+- [ ] 有足夠的 GPU 記憶體（V100 16GB 推薦 batch=16）
+
+---
+
+### 🔗 相關資源
+
+- [Ultralytics RTDETR 文檔](https://docs.ultralytics.com/models/rtdetr/)
+- [YOLO 格式說明](https://docs.ultralytics.com/datasets/)
+- [訓練最佳實踐](https://docs.ultralytics.com/modes/train/)
+
+---
+
 ## 📄 授權
 
 [請根據實際情況填寫授權資訊]
@@ -601,6 +1025,6 @@ python scripts/setup_environments.py --all --force
 
 - [RT-DETR](https://github.com/ultralytics/ultralytics) - Ultralytics
 - [LayerD](https://github.com/CyberAgentAILab/LayerD) - CyberAgent AI Lab
-- [CLD](https://github.com/monkek123King/CLD) - Conditional Layout Diffusion
-- [LLaVA](https://github.com/haotian-liu/LLaVA) - Large Language and Vision Assistant
+- [CLD](https://github.com/monkek123King/CLD)
+- [LLaVA](https://github.com/haotian-liu/LLaVA)
 
