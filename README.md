@@ -71,7 +71,7 @@ cp configs/exp001/pipeline.yaml configs/my_experiment/pipeline.yaml
 # 編輯配置檔案，設定輸入輸出路徑
 ```
 
-### 4. 執行 Pipeline
+### 5. 執行 Pipeline
 
 ```bash
 # 執行完整 pipeline
@@ -319,6 +319,14 @@ gdown --id 1TT5iBr1ber8pT0E7tcfUE-FV1ssn4dcQ -O checkpoints/rtdetr/rtdetr_dlcv_b
 **下載後**：
 - Checkpoint 會保存到 `checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt`
 - 這是 pipeline 配置中的預設路徑，無需額外配置即可使用
+
+**驗證下載**：
+```bash
+# 檢查文件是否存在
+ls -lh checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt
+
+# 應該看到文件大小約為數百 MB
+```
 
 ### CLD 模型下載
 

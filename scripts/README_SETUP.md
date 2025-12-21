@@ -51,6 +51,7 @@ python scripts/setup_environments.py --cld --ultralytics --llava
   - `conda create -n llava python=3.10 -y`
   - `conda run -n llava pip install --upgrade pip`
   - `cd third_party/llava && conda run -n llava pip install -e .`
+  - `conda run -n llava pip install protobuf`
 
 ## 使用選項
 
