@@ -1,24 +1,39 @@
 #!/usr/bin/env python
 """
-From CLD input JSON (containing ordered/quantized boxes) and corresponding image to generate bbox overlay GIF.
+From CLD input JSON (containing ordered/quantized boxes) and corresponding image to generate bbox overlay GIF or static image.
 
 Usage:
-  # Single file
+  # Generate GIF (default)
   python visualize_bbox_gif.py \
     --input /path/to/pipeline_outputs/cld/piccollage_001.json \
     --output /path/to/pipeline_outputs/cld/piccollage_001.gif \
     --use-quantized \
     --duration 500
 
-  # Entire folder（recursively find *.json, gif and json output or specify --output-dir）
+  # Generate static image with all layer numbers
+  python visualize_bbox_gif.py \
+    --input /path/to/pipeline_outputs/cld/piccollage_001.json \
+    --output /path/to/pipeline_outputs/cld/piccollage_001_static.png \
+    --static \
+    --use-quantized
+
+  # Entire folder（recursively find *.json, gif/json output or specify --output-dir）
   python visualize_bbox_gif.py \
     --input /path/to/pipeline_outputs/cld \
     --output-dir /path/to/pipeline_outputs/cld_gif \
     --use-quantized
 
+  # Entire folder with static images
+  python visualize_bbox_gif.py \
+    --input /path/to/pipeline_outputs/cld \
+    --output-dir /path/to/pipeline_outputs/cld_static \
+    --static \
+    --use-quantized
+
 Default:
   - Use ordered_bboxes, if --use-quantized is specified, use quantized_boxes.
-  - Each frame focuses on the current bbox, previous boxes are displayed in semi-transparent gray.
+  - Without --static: Each frame focuses on the current bbox, previous boxes are displayed in semi-transparent gray.
+  - With --static: All boxes are displayed with different colors and layer numbers (L0, L1, L2, ...).
 """
 
 from __future__ import annotations
@@ -101,15 +116,66 @@ def draw_frame(
     return out
 
 
+def draw_static_image(
+    base: Image.Image,
+    boxes: List[Tuple[int, int, int, int]],
+    palette: List[Tuple[int, int, int]],
+    font: ImageFont.ImageFont | None,
+) -> Image.Image:
+    """Draw a static image with all boxes and their layer numbers."""
+    base_rgb = base.convert("RGB")
+    overlay = Image.new("RGBA", base_rgb.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+
+    # Draw all boxes with different colors
+    for idx, (x0, y0, x1, y1) in enumerate(boxes):
+        x0 = max(0, min(x0, base_rgb.width - 1))
+        y0 = max(0, min(y0, base_rgb.height - 1))
+        x1 = max(0, min(x1, base_rgb.width - 1))
+        y1 = max(0, min(y1, base_rgb.height - 1))
+        color = palette[idx % len(palette)]
+        draw.rectangle([x0, y0, x1, y1], outline=color + (220,), width=3)
+        
+        # Draw layer number label
+        label = f"L{idx}"
+        if font:
+            try:
+                bbox = font.getbbox(label)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except Exception:
+                bbox = draw.textbbox((0, 0), label, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        else:
+            tw, th = draw.textlength(label), 14
+        
+        pad = 4
+        box_bg = (0, 0, 0, 180)
+        # Label placement: try above first, then inside if needed
+        y_top = y0 - th - pad * 2
+        if y_top < 0:
+            y_top = y0 + pad
+            y_bottom = y_top + th + pad * 2
+        else:
+            y_bottom = y0
+        
+        x_left = x0
+        x_right = min(base_rgb.width, x_left + int(tw) + pad * 2)
+        draw.rectangle([x_left, y_top, x_right, y_bottom], fill=box_bg)
+        draw.text((x_left + pad, y_top + pad), label, fill=(255, 255, 255, 255), font=font)
+
+    out = Image.alpha_composite(base_rgb.convert("RGBA"), overlay).convert("RGB")
+    return out
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Visualize CLD bboxes as GIF.")
+    parser = argparse.ArgumentParser(description="Visualize CLD bboxes as GIF or static image.")
     parser.add_argument("--input", required=True, type=Path, help="Single JSON or folder（recursively find *.json）")
-    parser.add_argument("--output", type=Path, help="Output GIF（only used in single file mode）")
+    parser.add_argument("--output", type=Path, help="Output GIF/PNG（only used in single file mode）")
     parser.add_argument("--output-dir", type=Path, help="Output directory for folder mode; default is the same level as JSON")
     parser.add_argument("--use-quantized", action="store_true", help="Use quantized_boxes, not ordered_bboxes")
-    parser.add_argument("--duration", type=int, default=500, help="Duration of each frame in milliseconds")
-    parser.add_argument("--loop", type=int, default=0, help="GIF loop times, 0 means infinite loop")
-    args = parser.parse_args()
+    parser.add_argument("--static", action="store_true", help="Generate static image with all layer numbers instead of GIF")
+    parser.add_argument("--duration", type=int, default=500, help="Duration of each frame in milliseconds (only for GIF)")
+    parser.add_argument("--loop", type=int, default=0, help="GIF loop times, 0 means infinite loop (only for GIF)")
     args = parser.parse_args()
 
     input_path: Path = args.input
@@ -149,25 +215,43 @@ def main() -> None:
         boxes = load_boxes(meta, use_quantized=args.use_quantized)
         base_img = Image.open(image_path).convert("RGB")
 
-        frames = [draw_frame(base_img, boxes, i, palette, font) for i in range(len(boxes))]
-
-        if args.output and not input_path.is_dir():
-            output = args.output
+        if args.static:
+            # Generate static image with all boxes
+            static_img = draw_static_image(base_img, boxes, palette, font)
+            
+            if args.output and not input_path.is_dir():
+                output = args.output
+                # Ensure output has .png extension for static images
+                if output.suffix.lower() not in ['.png', '.jpg', '.jpeg']:
+                    output = output.with_suffix('.png')
+            else:
+                out_dir = args.output_dir if args.output_dir else json_path.parent
+                out_dir.mkdir(parents=True, exist_ok=True)
+                output = out_dir / f"{json_path.stem}_static.png"
+            
+            static_img.save(output, "PNG")
+            print(f"[INFO] Saved static image to {output}")
         else:
-            out_dir = args.output_dir if args.output_dir else json_path.parent
-            out_dir.mkdir(parents=True, exist_ok=True)
-            output = out_dir / f"{json_path.stem}.gif"
+            # Generate GIF
+            frames = [draw_frame(base_img, boxes, i, palette, font) for i in range(len(boxes))]
 
-        frames[0].save(
-            output,
-            save_all=True,
-            append_images=frames[1:],
-            duration=args.duration,
-            loop=args.loop,
-            disposal=2,
-            optimize=False,
-        )
-        print(f"[INFO] Saved GIF to {output}")
+            if args.output and not input_path.is_dir():
+                output = args.output
+            else:
+                out_dir = args.output_dir if args.output_dir else json_path.parent
+                out_dir.mkdir(parents=True, exist_ok=True)
+                output = out_dir / f"{json_path.stem}.gif"
+
+            frames[0].save(
+                output,
+                save_all=True,
+                append_images=frames[1:],
+                duration=args.duration,
+                loop=args.loop,
+                disposal=2,
+                optimize=False,
+            )
+            print(f"[INFO] Saved GIF to {output}")
 
 
 if __name__ == "__main__":
