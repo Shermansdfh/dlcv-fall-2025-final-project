@@ -92,7 +92,8 @@ class LLaVACaptioner:
             self.conv_mode = "llava_llama_2"
         elif "mistral" in model_name.lower():
             self.conv_mode = "mistral_instruct"
-        elif "v1.6-34b" in model_name.lower():
+        elif "v1.6" in model_name.lower():
+            # All LLaVA 1.6 models use chatml_direct
             self.conv_mode = "chatml_direct"
         elif "v1" in model_name.lower():
             self.conv_mode = "llava_v1"
@@ -229,7 +230,7 @@ def main():
     print("🚀 Initializing LLaVA captioner...")
     try:
         vlm = LLaVACaptioner(
-            model_path=vlm_config.get("vlm_model_id", "liuhaotian/llava-v1.5-7b"),
+            model_path=vlm_config.get("vlm_model_id", "liuhaotian/llava-v1.6-vicuna-7b"),
             model_base=vlm_config.get("vlm_model_base", None),
             device=vlm_config.get("vlm_device", "cuda"),
             load_4bit=vlm_config.get("vlm_load_in_4bit", True),

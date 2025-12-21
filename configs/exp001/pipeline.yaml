@@ -34,7 +34,12 @@ step3_5:
   force_regenerate: false  # Set to true to regenerate captions even if they already exist
   vlm:
     use_vlm_caption: true  # Set to true to enable VLM caption generation
-    vlm_model_id: "liuhaotian/llava-v1.5-7b"  # LLaVA 1.5 model (HuggingFace model ID)
+    vlm_model_id: "liuhaotian/llava-v1.6-vicuna-7b"  # LLaVA 1.6 model (HuggingFace model ID)
+    # Available LLaVA 1.6 models:
+    # - "liuhaotian/llava-v1.6-vicuna-7b" (7B, recommended for most cases)
+    # - "liuhaotian/llava-v1.6-vicuna-13b" (13B, better performance)
+    # - "liuhaotian/llava-v1.6-mistral-7b" (Mistral 7B)
+    # - "liuhaotian/llava-v1.6-34b" (34B, best performance but requires more memory)
     vlm_model_base: null  # Optional: base model path for LoRA models
     vlm_device: "cuda"
     vlm_load_in_4bit: true  # Use 4-bit quantization to save memory
