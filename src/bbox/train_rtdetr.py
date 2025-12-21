@@ -69,7 +69,7 @@ def train_rtdetr_final():
         hsv_v=0.4,          # Brightness variation
         
         # === System optimization ===
-        cache=True,         # Cache images to RAM, accelerate training of 19K images
+        cache='disk',       # Cache images to disk (safer than RAM, prevents OOM with large datasets)
         amp=True,           # Automatic mixed precision (save memory, must open)
     )
     
