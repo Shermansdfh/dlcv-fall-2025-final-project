@@ -3,16 +3,16 @@
 
 # RTDETR Detection Step
 rtdetr:
-  input_dir: "inputs"  # Input images directory
-  output_dir: "outputs/pipeline_outputs/rtdetr"  # Where to save RTDETR results
-  model_path: "checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt"  # RTDETR model path
+  input_dir: "/workspace/finals/data/inputs"  # Input images directory
+  output_dir: "/workspace/finals/outputs/pipeline_outputs/rtdetr"  # Where to save RTDETR results
+  model_path: "/workspace/finals/checkpoints/rtdetr/rtdetr_dlcv_bbox_dataset/weights/best.pt"  # RTDETR model path
   conf: 0.4  # Confidence threshold
   limit: null  # Limit number of images (null = process all)
 
 # LayerD Decomposition Step
 layerd:
-  rtdetr_output_dir: "outputs/pipeline_outputs/rtdetr"  # Read RTDETR results from here
-  output_dir: "outputs/pipeline_outputs/layerd"  # Where to save LayerD masks
+  rtdetr_output_dir: "/workspace/finals/outputs/pipeline_outputs/rtdetr"  # Read RTDETR results from here
+  output_dir: "/workspace/finals/outputs/pipeline_outputs/layerd"  # Where to save LayerD masks
   max_iterations: 2  # LayerD decomposition iterations (reduced from 3 to save memory)
   device: "cuda"  # Device: "cpu" or "cuda"
   limit: null  # Limit number of images (null = process all)
@@ -24,22 +24,17 @@ layerd:
 
 # CLD Format Conversion Step
 cld:
-  rtdetr_output_dir: "outputs/pipeline_outputs/rtdetr"  # Read RTDETR results from here
-  layerd_output_dir: "outputs/pipeline_outputs/layerd"  # Read LayerD results from here
-  output_dir: "outputs/pipeline_outputs/cld"  # Where to save CLD format results
+  rtdetr_output_dir: "/workspace/finals/outputs/pipeline_outputs/rtdetr"  # Read RTDETR results from here
+  layerd_output_dir: "/workspace/finals/outputs/pipeline_outputs/layerd"  # Read LayerD results from here
+  output_dir: "/workspace/finals/outputs/pipeline_outputs/cld"  # Where to save CLD format results
 
 # Step 3.5: VLM Caption Generation (runs in separate environment)
 step3_5:
-  cld_output_dir: "outputs/pipeline_outputs/cld"  # Read CLD JSON files from here
+  cld_output_dir: "/workspace/finals/outputs/pipeline_outputs/cld"  # Read CLD JSON files from here
   force_regenerate: false  # Set to true to regenerate captions even if they already exist
   vlm:
     use_vlm_caption: true  # Set to true to enable VLM caption generation
-    vlm_model_id: "liuhaotian/llava-v1.6-vicuna-7b"  # LLaVA 1.6 model (HuggingFace model ID)
-    # Available LLaVA 1.6 models:
-    # - "liuhaotian/llava-v1.6-vicuna-7b" (7B, recommended for most cases)
-    # - "liuhaotian/llava-v1.6-vicuna-13b" (13B, better performance)
-    # - "liuhaotian/llava-v1.6-mistral-7b" (Mistral 7B)
-    # - "liuhaotian/llava-v1.6-34b" (34B, best performance but requires more memory)
+    vlm_model_id: "liuhaotian/llava-v1.5-7b"  # LLaVA 1.5 model (HuggingFace model ID)
     vlm_model_base: null  # Optional: base model path for LoRA models
     vlm_device: "cuda"
     vlm_load_in_4bit: true  # Use 4-bit quantization to save memory

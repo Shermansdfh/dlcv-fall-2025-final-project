@@ -230,7 +230,7 @@ def main():
     print("🚀 Initializing LLaVA captioner...")
     try:
         vlm = LLaVACaptioner(
-            model_path=vlm_config.get("vlm_model_id", "liuhaotian/llava-v1.6-vicuna-7b"),
+            model_path=vlm_config.get("vlm_model_id", "liuhaotian/llava-v1.5-7b"),
             model_base=vlm_config.get("vlm_model_base", None),
             device=vlm_config.get("vlm_device", "cuda"),
             load_4bit=vlm_config.get("vlm_load_in_4bit", True),

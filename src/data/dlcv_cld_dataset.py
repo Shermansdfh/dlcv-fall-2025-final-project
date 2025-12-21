@@ -150,6 +150,7 @@ class DLCVCLDDataset(Dataset):
         caption_json_path: Optional[Union[str, Path]] = None,
         use_depth: bool = False,
         depth_device: Optional[torch.device] = None,
+        depth_map_dir: Optional[Union[str, Path]] = None,
     ):
         """
         Initialize dataset from HuggingFace dataset.
@@ -160,44 +161,63 @@ class DLCVCLDDataset(Dataset):
             max_samples: Maximum number of samples to load (None for all)
             shuffle_buffer_size: Buffer size for streaming shuffle
             caption_json_path: Path to caption_llava15.json file (default: depth_exp/caption_llava15.json)
-            use_depth: Whether to add depth channel using ml-depth-pro (default: False)
-            depth_device: Device for depth model (default: cuda if available, else cpu)
+            use_depth: Whether to add depth channel (default: False)
+            depth_device: Device for depth model if generating on-the-fly (default: cuda if available, else cpu)
+            depth_map_dir: Directory containing pre-generated depth maps (.npz files). 
+                          If provided, depth maps will be loaded from files instead of generating on-the-fly.
+                          This avoids needing depth-pro environment during training.
         """
         self.split = split
         self.seed = seed
         self.max_samples = max_samples
         self.to_tensor = T.ToTensor()
         self.use_depth = use_depth
+        self.depth_map_dir = Path(depth_map_dir) if depth_map_dir else None
         
-        # Initialize depth model if requested
+        # Initialize depth: either from pre-generated files or on-the-fly generation
         self.depth_model = None
         self.depth_transform = None
         if use_depth:
-            if not DEPTH_PRO_AVAILABLE:
-                raise ImportError(
-                    "depth_pro is not available. Please install ml-depth-pro:\n"
-                    "  cd depth_exp/ml-depth-pro\n"
-                    "  pip install -e ."
-                )
-            
-            if depth_device is None:
-                depth_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
-            print(f"[INFO] Loading depth model (device: {depth_device})...")
-            try:
-                self.depth_model, self.depth_transform = depth_pro.create_model_and_transforms(
-                    device=depth_device,
-                    precision=torch.half if depth_device.type == "cuda" else torch.float32,
-                )
-                self.depth_model.eval()
-                self.depth_device = depth_device
-                print("[INFO] Depth model loaded successfully")
-            except Exception as e:
-                print(f"[WARN] Failed to load depth model: {e}")
-                print("[WARN] Continuing without depth channel")
-                self.use_depth = False
-                self.depth_model = None
-                self.depth_transform = None
+            if self.depth_map_dir is not None:
+                # Use pre-generated depth maps from files
+                if not self.depth_map_dir.exists():
+                    print(f"[WARN] Depth map directory not found: {self.depth_map_dir}")
+                    print("[WARN] Continuing without depth channel")
+                    self.use_depth = False
+                    self.depth_map_dir = None
+                else:
+                    print(f"[INFO] Using pre-generated depth maps from: {self.depth_map_dir}")
+                    # Count available depth maps
+                    depth_files = list(self.depth_map_dir.glob("*.npz"))
+                    print(f"[INFO] Found {len(depth_files)} depth map files")
+            else:
+                # Generate depth maps on-the-fly (requires depth-pro environment)
+                if not DEPTH_PRO_AVAILABLE:
+                    raise ImportError(
+                        "depth_pro is not available. Please either:\n"
+                        "  1. Install ml-depth-pro: cd depth_exp/ml-depth-pro && pip install -e .\n"
+                        "  2. Or pre-generate depth maps using: python scripts/generate_depth_maps.py\n"
+                        "     Then set depth_map_dir in dataset config."
+                    )
+                
+                if depth_device is None:
+                    depth_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                
+                print(f"[INFO] Loading depth model for on-the-fly generation (device: {depth_device})...")
+                try:
+                    self.depth_model, self.depth_transform = depth_pro.create_model_and_transforms(
+                        device=depth_device,
+                        precision=torch.half if depth_device.type == "cuda" else torch.float32,
+                    )
+                    self.depth_model.eval()
+                    self.depth_device = depth_device
+                    print("[INFO] Depth model loaded successfully")
+                except Exception as e:
+                    print(f"[WARN] Failed to load depth model: {e}")
+                    print("[WARN] Continuing without depth channel")
+                    self.use_depth = False
+                    self.depth_model = None
+                    self.depth_transform = None
         
         # Load caption JSON file
         if caption_json_path is None:
@@ -371,7 +391,8 @@ class DLCVCLDDataset(Dataset):
         # Generate depth map for the whole image if enabled
         depth_map = None
         if self.use_depth:
-            depth_map = self._generate_depth(main_img)
+            img_id = sample.get('id', '')
+            depth_map = self._generate_depth(main_img, img_id=img_id)
         
         # Get canvas size
         canvas_w = float(sample.get('canvas_width', W))
