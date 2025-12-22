@@ -110,13 +110,6 @@ Downloaded assets include:
 - CLD LoRA weights
 - Transparent VAE weights
 
-### Testing Data
-
-```bash
-# Download test data from Google Drive
-python scripts/download_testing_data.py --file-id "YOUR_FILE_ID"
-```
-
 ---
 
 ## Pipeline Usage
