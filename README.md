@@ -28,7 +28,7 @@ A complete end-to-end image layout decomposition pipeline from object detection 
 # Clone repository and initialize submodules
 # git clone <repository-url>
 # cd dlcv-fall-2025-final-project
-# git submodule update --init --recursive
+# git submodule update --init --recursive  
 
 # Setup all environments
 python scripts/setup_environments.py --all
