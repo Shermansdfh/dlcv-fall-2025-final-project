@@ -258,6 +258,9 @@ if [ "$SETUP_LLAVA" = true ]; then
         conda run -n llava pip install -e .
         cd "$REPO_ROOT"
         
+        echo "📦 Installing protobuf..."
+        conda run -n llava pip install protobuf
+        
         echo -e "${GREEN}✅ LLaVA environment created successfully${NC}"
     fi
 fi
