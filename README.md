@@ -24,6 +24,8 @@ A complete end-to-end image layout decomposition pipeline from object detection 
 
 ### Quick Setup
 
+The root should be my_implementation
+
 ```bash
 # Clone repository and initialize submodules
 # git clone <repository-url>
@@ -126,7 +128,7 @@ The pipeline consists of 5 main steps:
 
 ### Configuration
 
-Create or copy a configuration file:
+Create or copy a configuration file (Note that absolute path is required):
 
 ```bash
 cp configs/exp001/pipeline.yaml configs/my_experiment/pipeline.yaml
