@@ -1,5 +1,7 @@
 # DLCV Final Project - Layout Decomposition Pipeline
 
+For problem statement, please refer to challenge 2 of following [slides](https://docs.google.com/presentation/d/1wbZBPT7-C7j0wt5RqpNxZMWoqZKYw1fdizRz9hojfeQ/edit?slide=id.g399edabb9d6_0_107#slide=id.g399edabb9d6_0_107)
+
 A complete end-to-end image layout decomposition pipeline from object detection to layered composition. For more details, please refer to [poster](https://github.com/Shermansdfh/dlcv-fall-2025-final-project/blob/main/11_ShuoIsAllYouNeed_poster.pdf). 
 
 ## Important Links
